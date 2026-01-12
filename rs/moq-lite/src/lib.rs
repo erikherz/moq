@@ -34,6 +34,7 @@
 //! - Use [FrameProducer] and [FrameConsumer] for chunked frame writes/reads without allocating entire frames (useful for relaying).
 //! - Use [TrackProducer::create_group] instead of [TrackProducer::append_group] to produce groups out-of-order.
 
+mod command;
 mod error;
 mod model;
 mod path;
@@ -44,6 +45,7 @@ pub mod coding;
 pub mod ietf;
 pub mod lite;
 
+pub use command::*;
 pub use error::*;
 pub use model::*;
 pub use path::*;

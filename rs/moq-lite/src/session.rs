@@ -2,8 +2,10 @@ use std::{future::Future, pin::Pin, sync::Arc};
 
 use crate::{
 	coding::{self, Decode, Encode, Stream},
-	ietf, lite, setup, Error, OriginConsumer, OriginProducer,
+	ietf, lite, setup, AsPath, Error, OriginConsumer, OriginProducer, SubscriberCommand,
 };
+
+use tokio::sync::mpsc;
 
 /// A MoQ transport session, wrapping a WebTransport connection.
 ///
@@ -12,6 +14,9 @@ use crate::{
 /// - [`Session::accept`] for servers.
 pub struct Session {
 	session: Arc<dyn SessionInner>,
+	/// Channel for sending commands to the subscriber side of the session.
+	/// Only available when the session is connected with a subscribe origin.
+	subscriber_commands: Option<mpsc::Sender<SubscriberCommand>>,
 }
 
 /// The versions of MoQ that are supported by this implementation.
@@ -27,9 +32,13 @@ pub const VERSIONS: [coding::Version; 3] = [
 pub const ALPNS: [&str; 2] = [lite::ALPN, ietf::ALPN];
 
 impl Session {
-	fn new<S: web_transport_trait::Session>(session: S) -> Self {
+	fn new<S: web_transport_trait::Session>(
+		session: S,
+		subscriber_commands: Option<mpsc::Sender<SubscriberCommand>>,
+	) -> Self {
 		Self {
 			session: Arc::new(session),
+			subscriber_commands,
 		}
 	}
 
@@ -42,6 +51,17 @@ impl Session {
 		publish: impl Into<Option<OriginConsumer>>,
 		subscribe: impl Into<Option<OriginProducer>>,
 	) -> Result<Self, Error> {
+		let publish = publish.into();
+		let subscribe = subscribe.into();
+
+		// Create command channel if we're subscribing (so we can send announce_remote commands)
+		let (cmd_tx, cmd_rx) = if subscribe.is_some() {
+			let (tx, rx) = mpsc::channel(16);
+			(Some(tx), Some(rx))
+		} else {
+			(None, None)
+		};
+
 		let mut stream = Stream::open(&session, setup::ServerKind::Ietf14).await?;
 
 		let mut parameters = ietf::Parameters::default();
@@ -66,7 +86,7 @@ impl Session {
 
 		if let Ok(version) = lite::Version::try_from(server.version) {
 			let stream = stream.with_version(version);
-			lite::start(session.clone(), stream, publish.into(), subscribe.into(), version).await?;
+			lite::start(session.clone(), stream, publish, subscribe, version).await?;
 		} else if let Ok(version) = ietf::Version::try_from(server.version) {
 			// Decode the parameters to get the initial request ID.
 			let parameters = ietf::Parameters::decode(&mut server.parameters, version)?;
@@ -79,9 +99,10 @@ impl Session {
 				stream,
 				request_id_max,
 				true,
-				publish.into(),
-				subscribe.into(),
+				publish,
+				subscribe,
 				version,
+				cmd_rx,
 			)
 			.await?;
 		} else {
@@ -91,7 +112,7 @@ impl Session {
 
 		tracing::debug!(version = ?server.version, "connected");
 
-		Ok(Self::new(session))
+		Ok(Self::new(session, cmd_tx))
 	}
 
 	/// Perform the MoQ handshake as a server.
@@ -103,6 +124,17 @@ impl Session {
 		publish: impl Into<Option<OriginConsumer>>,
 		subscribe: impl Into<Option<OriginProducer>>,
 	) -> Result<Self, Error> {
+		let publish = publish.into();
+		let subscribe = subscribe.into();
+
+		// Create command channel if we're subscribing (so we can send announce_remote commands)
+		let (cmd_tx, cmd_rx) = if subscribe.is_some() {
+			let (tx, rx) = mpsc::channel(16);
+			(Some(tx), Some(rx))
+		} else {
+			(None, None)
+		};
+
 		// Accept with an initial version; we'll switch to the negotiated version later
 		let mut stream = Stream::accept(&session, ()).await?;
 		let client: setup::Client = stream.reader.decode().await?;
@@ -134,7 +166,7 @@ impl Session {
 
 		if let Ok(version) = lite::Version::try_from(version) {
 			let stream = stream.with_version(version);
-			lite::start(session.clone(), stream, publish.into(), subscribe.into(), version).await?;
+			lite::start(session.clone(), stream, publish, subscribe, version).await?;
 		} else if let Ok(version) = ietf::Version::try_from(version) {
 			// Decode the parameters to get the initial request ID.
 			let parameters = ietf::Parameters::decode(&mut server.parameters, version)?;
@@ -147,9 +179,10 @@ impl Session {
 				stream,
 				request_id_max,
 				false,
-				publish.into(),
-				subscribe.into(),
+				publish,
+				subscribe,
 				version,
+				cmd_rx,
 			)
 			.await?;
 		} else {
@@ -159,7 +192,7 @@ impl Session {
 
 		tracing::debug!(?version, "connected");
 
-		Ok(Self::new(session))
+		Ok(Self::new(session, cmd_tx))
 	}
 
 	/// Close the underlying transport session.
@@ -172,6 +205,27 @@ impl Session {
 	pub async fn closed(&self) -> Result<(), Error> {
 		let err = self.session.closed().await;
 		Err(Error::Transport(err))
+	}
+
+	/// Manually announce a remote broadcast without waiting for PUBLISH_NAMESPACE.
+	///
+	/// Use this when you know a broadcast exists on the remote but they won't announce it.
+	/// This is useful for bridging with implementations (like CloudFlare) that don't send
+	/// PUBLISH_NAMESPACE messages.
+	///
+	/// This triggers `start_announce()` internally, which:
+	/// 1. Creates a Broadcast and publishes to the origin
+	/// 2. Spawns a broadcast handler that listens for track requests
+	/// 3. When tracks are requested, sends SUBSCRIBE to the remote
+	pub async fn announce_remote(&self, path: impl AsPath) -> Result<(), Error> {
+		if let Some(tx) = &self.subscriber_commands {
+			tx.send(SubscriberCommand::AnnounceRemote(path.as_path().to_owned()))
+				.await
+				.map_err(|_| Error::Cancel)?;
+			Ok(())
+		} else {
+			Err(Error::InvalidRole)
+		}
 	}
 }
 

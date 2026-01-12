@@ -7,10 +7,11 @@ use crate::{
 	coding::Reader,
 	ietf::{self, Control, FetchHeader, FilterType, GroupFlags, GroupOrder, RequestId, Version},
 	model::BroadcastProducer,
-	Broadcast, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned, Track,
-	TrackProducer,
+	Broadcast, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned,
+	SubscriberCommand, Track, TrackProducer,
 };
 
+use tokio::sync::mpsc;
 use web_async::Lock;
 
 #[derive(Default)]
@@ -182,22 +183,59 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		Ok(())
 	}
 
-	pub async fn run(self) -> Result<(), Error> {
-		loop {
-			let stream = self
-				.session
-				.accept_uni()
-				.await
-				.map_err(|err| Error::Transport(Arc::new(err)))?;
+	pub async fn run(mut self, commands: Option<mpsc::Receiver<SubscriberCommand>>) -> Result<(), Error> {
+		match commands {
+			Some(mut rx) => {
+				// With command channel: listen for both uni streams and commands
+				loop {
+					tokio::select! {
+						stream = self.session.accept_uni() => {
+							let stream = stream.map_err(|err| Error::Transport(Arc::new(err)))?;
+							let stream = Reader::new(stream, self.version);
+							let this = self.clone();
 
-			let stream = Reader::new(stream, self.version);
-			let this = self.clone();
-
-			web_async::spawn(async move {
-				if let Err(err) = this.run_uni_stream(stream).await {
-					tracing::debug!(%err, "error running uni stream");
+							web_async::spawn(async move {
+								if let Err(err) = this.run_uni_stream(stream).await {
+									tracing::debug!(%err, "error running uni stream");
+								}
+							});
+						}
+						cmd = rx.recv() => {
+							match cmd {
+								Some(SubscriberCommand::AnnounceRemote(path)) => {
+									tracing::info!(path = %path, "manually announcing remote broadcast");
+									if let Err(err) = self.start_announce(path) {
+										tracing::warn!(%err, "failed to announce remote");
+									}
+								}
+								None => {
+									// Command channel closed, continue accepting streams
+									tracing::debug!("command channel closed");
+								}
+							}
+						}
+					}
 				}
-			});
+			}
+			None => {
+				// Without command channel: original behavior
+				loop {
+					let stream = self
+						.session
+						.accept_uni()
+						.await
+						.map_err(|err| Error::Transport(Arc::new(err)))?;
+
+					let stream = Reader::new(stream, self.version);
+					let this = self.clone();
+
+					web_async::spawn(async move {
+						if let Err(err) = this.run_uni_stream(stream).await {
+							tracing::debug!(%err, "error running uni stream");
+						}
+					});
+				}
+			}
 		}
 	}
 

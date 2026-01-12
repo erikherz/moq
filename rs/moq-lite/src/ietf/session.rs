@@ -1,10 +1,11 @@
 use crate::{
 	coding::{Reader, Stream},
 	ietf::{self, Control, Message, RequestId, Version},
-	Error, OriginConsumer, OriginProducer,
+	Error, OriginConsumer, OriginProducer, SubscriberCommand,
 };
 
 use super::{Publisher, Subscriber};
+use tokio::sync::mpsc;
 
 pub(crate) async fn start<S: web_transport_trait::Session>(
 	session: S,
@@ -14,6 +15,7 @@ pub(crate) async fn start<S: web_transport_trait::Session>(
 	publish: Option<OriginConsumer>,
 	subscribe: Option<OriginProducer>,
 	version: Version,
+	subscriber_commands: Option<mpsc::Receiver<SubscriberCommand>>,
 ) -> Result<(), Error> {
 	web_async::spawn(async move {
 		match run(
@@ -24,6 +26,7 @@ pub(crate) async fn start<S: web_transport_trait::Session>(
 			publish,
 			subscribe,
 			version,
+			subscriber_commands,
 		)
 		.await
 		{
@@ -53,6 +56,7 @@ async fn run<S: web_transport_trait::Session>(
 	publish: Option<OriginConsumer>,
 	subscribe: Option<OriginProducer>,
 	version: Version,
+	subscriber_commands: Option<mpsc::Receiver<SubscriberCommand>>,
 ) -> Result<(), Error> {
 	let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 	let control = Control::new(tx, request_id_max, client, version);
@@ -60,7 +64,7 @@ async fn run<S: web_transport_trait::Session>(
 	let subscriber = Subscriber::new(session.clone(), subscribe, control.clone(), version);
 
 	tokio::select! {
-		res = subscriber.clone().run() => res,
+		res = subscriber.clone().run(subscriber_commands) => res,
 		res = publisher.clone().run() => res,
 		res = run_control_read(setup.reader, control, publisher, subscriber) => res,
 		res = Control::run::<S>(setup.writer, rx) => res,
