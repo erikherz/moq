@@ -20,6 +20,8 @@ export const ContainerSchema = z
 			timescale: u53Schema,
 			// Track ID used in the moof/mdat fragments
 			trackId: u53Schema,
+			// Default sample duration from trex (fallback when trun/tfhd omit per-sample durations)
+			defaultSampleDuration: u53Schema.optional(),
 		}),
 	])
 	.default({ kind: "legacy" });

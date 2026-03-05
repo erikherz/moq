@@ -244,7 +244,7 @@ export class Decoder {
 	#runCmafDecoder(effect: Effect, sub: Moq.Track, config: Catalog.AudioConfig): void {
 		if (config.container.kind !== "cmaf") return; // just to help typescript
 
-		const { timescale } = config.container;
+		const { timescale, defaultSampleDuration } = config.container;
 		const description = config.description ? Util.Hex.toBytes(config.description) : undefined;
 
 		// For CMAF, just use decode buffer (no network jitter buffer yet)
@@ -284,7 +284,7 @@ export class Decoder {
 							const segment = await group.readFrame();
 							if (!segment) break;
 
-							const samples = Container.Cmaf.decodeDataSegment(segment, timescale);
+							const samples = Container.Cmaf.decodeDataSegment(segment, timescale, defaultSampleDuration);
 
 							for (const sample of samples) {
 								this.#stats.update((stats) => ({

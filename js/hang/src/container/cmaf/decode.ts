@@ -80,6 +80,8 @@ export interface InitSegment {
 	timescale: number;
 	/** Track ID from the init segment */
 	trackId: number;
+	/** Default sample duration from trex box (fallback when trun/tfhd omit it) */
+	defaultSampleDuration?: number;
 }
 
 /**
@@ -105,6 +107,31 @@ function toArrayBuffer(data: Uint8Array): ArrayBuffer {
 // Type guard for finding boxes by type
 function isBoxType<T extends ParsedIsoBox>(type: string) {
 	return (box: ParsedIsoBox): box is T => box.type === type;
+}
+
+/**
+ * Manually scan for a trex box in raw MP4 data and extract default_sample_duration.
+ * trex layout: version(1) + flags(3) + track_ID(4) + default_sample_description_index(4) + default_sample_duration(4) + ...
+ */
+function parseDefaultSampleDuration(data: Uint8Array): number | undefined {
+	const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+	for (let i = 0; i + 8 <= data.length; ) {
+		const size = view.getUint32(i);
+		if (size < 8 || i + size > data.length) break;
+		const type = String.fromCharCode(data[i + 4], data[i + 5], data[i + 6], data[i + 7]);
+		if (type === "trex" && size >= 8 + 16) {
+			// Content starts at i+8: version(1) + flags(3) + track_ID(4) + default_desc_idx(4) + default_duration(4)
+			const duration = view.getUint32(i + 8 + 12);
+			return duration > 0 ? duration : undefined;
+		}
+		// Recurse into container boxes
+		if (type === "moov" || type === "mvex") {
+			const inner = parseDefaultSampleDuration(data.subarray(i + 8, i + size));
+			if (inner !== undefined) return inner;
+		}
+		i += size;
+	}
+	return undefined;
 }
 
 /**
@@ -138,10 +165,15 @@ export function decodeInitSegment(init: Uint8Array): InitSegment {
 	const entry = stsd.entries[0];
 	const description = extractDescription(entry);
 
+	// Extract default_sample_duration from trex box.
+	// Parse manually from the raw init bytes since the library may not have readTrex.
+	const defaultSampleDuration = parseDefaultSampleDuration(init) || undefined;
+
 	return {
 		description,
 		timescale: mdhd.timescale,
 		trackId,
+		defaultSampleDuration,
 	};
 }
 
@@ -221,9 +253,10 @@ export function decodeTimestamp(segment: Uint8Array, timescale: number): Time.Mi
  *
  * @param segment - The moof + mdat data
  * @param timescale - Time units per second (from init segment)
+ * @param defaultSampleDuration - Default sample duration from trex (fallback when trun/tfhd omit it)
  * @returns Array of decoded samples
  */
-export function decodeDataSegment(segment: Uint8Array, timescale: number): Sample[] {
+export function decodeDataSegment(segment: Uint8Array, timescale: number, defaultSampleDuration?: number): Sample[] {
 	// Cast to ParsedIsoBox[] since the library's return type changes with readers
 	const boxes = readIsoBoxes(toArrayBuffer(segment), { readers: DATA_READERS }) as ParsedIsoBox[];
 
@@ -233,7 +266,7 @@ export function decodeDataSegment(segment: Uint8Array, timescale: number): Sampl
 
 	// Find moof > traf > tfhd for default sample values
 	const tfhd = findBox(boxes, isBoxType<TrackFragmentHeaderBox & ParsedIsoBox>("tfhd"));
-	const defaultDuration = tfhd?.defaultSampleDuration ?? 0;
+	const defaultDuration = tfhd?.defaultSampleDuration ?? defaultSampleDuration ?? 0;
 	const defaultSize = tfhd?.defaultSampleSize ?? 0;
 	const defaultFlags = tfhd?.defaultSampleFlags ?? 0;
 

@@ -355,7 +355,7 @@ class DecoderTrack {
 	#runCmaf(effect: Effect, sub: Moq.Track, decoder: VideoDecoder): void {
 		if (this.config.container.kind !== "cmaf") return;
 
-		const { timescale } = this.config.container;
+		const { timescale, defaultSampleDuration } = this.config.container;
 		const description = this.config.description ? Util.Hex.toBytes(this.config.description) : undefined;
 
 		// Configure decoder with description from catalog
@@ -388,7 +388,7 @@ class DecoderTrack {
 							const segment = await Promise.race([group.readFrame(), effect.cancel]);
 							if (!segment) break;
 
-							const samples = Container.Cmaf.decodeDataSegment(segment, timescale);
+							const samples = Container.Cmaf.decodeDataSegment(segment, timescale, defaultSampleDuration);
 
 							for (const sample of samples) {
 								const chunk = new EncodedVideoChunk({
