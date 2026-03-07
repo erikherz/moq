@@ -163,6 +163,9 @@ impl Message for Subscribe<'_> {
 pub struct SubscribeOk {
 	pub request_id: Option<RequestId>,
 	pub track_alias: u64,
+	/// If Some, content_exists=true and this is the largest location.
+	/// If None, content_exists=false.
+	pub largest_location: Option<Location>,
 }
 
 impl Message for SubscribeOk {
@@ -182,7 +185,12 @@ impl Message for SubscribeOk {
 			Version::Draft14 => {
 				0u64.encode(w, version)?; // expires = 0
 				GroupOrder::Descending.encode(w, version)?;
-				false.encode(w, version)?; // no content
+				if let Some(ref loc) = self.largest_location {
+					true.encode(w, version)?; // content exists
+					loc.encode(w, version)?;
+				} else {
+					false.encode(w, version)?; // no content
+				}
 				0u8.encode(w, version)?; // no parameters
 			}
 			Version::Draft15 | Version::Draft16 | Version::Draft17 => {
@@ -203,6 +211,8 @@ impl Message for SubscribeOk {
 		};
 		let track_alias = u64::decode(r, version)?;
 
+		let mut largest_location = None;
+
 		match version {
 			Version::Draft14 => {
 				let expires = u64::decode(r, version)?;
@@ -213,8 +223,7 @@ impl Message for SubscribeOk {
 				let _group_order = u8::decode(r, version)?;
 
 				if bool::decode(r, version)? {
-					let _group = u64::decode(r, version)?;
-					let _object = u64::decode(r, version)?;
+					largest_location = Some(Location::decode(r, version)?);
 				}
 
 				let _params = Parameters::decode(r, version)?;
@@ -229,6 +238,7 @@ impl Message for SubscribeOk {
 		Ok(Self {
 			request_id,
 			track_alias,
+			largest_location,
 		})
 	}
 }
@@ -486,6 +496,7 @@ mod tests {
 		let msg = SubscribeOk {
 			request_id: Some(RequestId(42)),
 			track_alias: 42,
+			largest_location: Some(Location { group: 5, object: 0 }),
 		};
 
 		let encoded = encode_message(&msg, Version::Draft14);
@@ -499,6 +510,7 @@ mod tests {
 		let msg = SubscribeOk {
 			request_id: Some(RequestId(42)),
 			track_alias: 42,
+			largest_location: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft15);
@@ -637,6 +649,7 @@ mod tests {
 		let msg = SubscribeOk {
 			request_id: None,
 			track_alias: 42,
+			largest_location: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft17);
