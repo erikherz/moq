@@ -124,9 +124,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			Err(err) => return self.send_subscribe_error(request_id, 404, &err.to_string()),
 		};
 
-		let latest_group = track.latest().unwrap_or(0);
-		let largest_location = Some(ietf::Location { group: latest_group, object: 0 });
-
 		let (tx, rx) = oneshot::channel();
 		let mut subscribes = self.subscribes.lock();
 		subscribes.insert(request_id, tx);
@@ -134,7 +131,6 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		self.control.send(ietf::SubscribeOk {
 			request_id: Some(request_id),
 			track_alias: request_id.0, // NOTE: using track alias as request id for now
-			largest_location,
 		})?;
 
 		let session = self.session.clone();
