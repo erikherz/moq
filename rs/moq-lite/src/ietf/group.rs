@@ -71,9 +71,14 @@ pub struct GroupFlags {
 }
 
 impl GroupFlags {
-	// v14 range: 0x10-0x1d (priority always present)
-	pub const START: u64 = 0x10;
-	pub const END: u64 = 0x1d;
+	// v14 range: 0x08-0x0d (priority always present, no has_end bit)
+	// Compatible with Shaka Player's draft-14 implementation.
+	pub const START: u64 = 0x08;
+	pub const END: u64 = 0x0d;
+
+	// Legacy v14 range (0x10-0x1d) accepted for decode backward compat.
+	pub const LEGACY_START: u64 = 0x10;
+	pub const LEGACY_END: u64 = 0x1d;
 
 	// v15 adds: 0x30-0x3d (priority absent, inherits from control message)
 	pub const START_NO_PRIORITY: u64 = 0x30;
@@ -99,7 +104,9 @@ impl GroupFlags {
 		if self.has_subgroup {
 			id |= 0x04;
 		}
-		if self.has_end {
+		// has_end is only encoded for the v15 no-priority range (0x30+).
+		// The v14 range (0x08+) has no has_end bit — end is implicit from stream FIN.
+		if !self.has_priority && self.has_end {
 			id |= 0x08;
 		}
 		Ok(id)
@@ -107,9 +114,13 @@ impl GroupFlags {
 
 	pub fn decode(id: u64) -> Result<Self, DecodeError> {
 		let (has_priority, base_id) = if (Self::START..=Self::END).contains(&id) {
-			(true, id)
+			// v14 range: 0x08-0x0d (no has_end bit)
+			(true, id - Self::START)
+		} else if (Self::LEGACY_START..=Self::LEGACY_END).contains(&id) {
+			// Legacy v14 range: 0x10-0x1d (has has_end bit at bit 3)
+			(true, id - Self::LEGACY_START)
 		} else if (Self::START_NO_PRIORITY..=Self::END_NO_PRIORITY).contains(&id) {
-			(false, id - (Self::START_NO_PRIORITY - Self::START))
+			(false, id - Self::START_NO_PRIORITY)
 		} else {
 			return Err(DecodeError::InvalidValue);
 		};
@@ -117,7 +128,13 @@ impl GroupFlags {
 		let has_extensions = (base_id & 0x01) != 0;
 		let has_subgroup_object = (base_id & 0x02) != 0;
 		let has_subgroup = (base_id & 0x04) != 0;
-		let has_end = (base_id & 0x08) != 0;
+		// has_end is at bit 3 for legacy v14 range and v15 no-priority range.
+		// For the v14 range (0x08-0x0d) it's always true (implicit from stream FIN).
+		let has_end = if (Self::START..=Self::END).contains(&id) {
+			true // v14: implicit from stream FIN
+		} else {
+			(base_id & 0x08) != 0 // legacy and no-priority: explicit bit
+		};
 
 		if has_subgroup && has_subgroup_object {
 			return Err(DecodeError::InvalidValue);
@@ -208,125 +225,104 @@ impl Decode<Version> for GroupHeader {
 mod tests {
 	use super::*;
 
-	// Test table from draft-ietf-moq-transport-14 Section 10.4.2 Table 7
 	#[test]
-	fn test_group_flags_spec_table() {
-		// Type 0x10: No subgroup field, Subgroup ID = 0, No extensions, No end
+	fn test_group_flags_v14_encode() {
+		// Default flags encode to 0x08 (base, no extras)
+		let flags = GroupFlags::default();
+		assert_eq!(flags.encode().unwrap(), 0x08);
+
+		// With extensions: 0x09
+		let flags = GroupFlags { has_extensions: true, ..Default::default() };
+		assert_eq!(flags.encode().unwrap(), 0x09);
+
+		// With subgroup_object: 0x0A
+		let flags = GroupFlags { has_subgroup_object: true, ..Default::default() };
+		assert_eq!(flags.encode().unwrap(), 0x0A);
+
+		// With explicit subgroup: 0x0C
+		let flags = GroupFlags { has_subgroup: true, ..Default::default() };
+		assert_eq!(flags.encode().unwrap(), 0x0C);
+
+		// With subgroup + extensions: 0x0D
+		let flags = GroupFlags { has_subgroup: true, has_extensions: true, ..Default::default() };
+		assert_eq!(flags.encode().unwrap(), 0x0D);
+
+		// Invalid: both subgroup and subgroup_object
+		let flags = GroupFlags { has_subgroup: true, has_subgroup_object: true, ..Default::default() };
+		assert!(flags.encode().is_err());
+	}
+
+	#[test]
+	fn test_group_flags_v14_decode() {
+		// 0x08: base
+		let flags = GroupFlags::decode(0x08).unwrap();
+		assert!(!flags.has_subgroup);
+		assert!(!flags.has_subgroup_object);
+		assert!(!flags.has_extensions);
+		assert!(flags.has_end); // implicit
+		assert!(flags.has_priority);
+
+		// 0x09: extensions
+		let flags = GroupFlags::decode(0x09).unwrap();
+		assert!(flags.has_extensions);
+		assert!(!flags.has_subgroup);
+
+		// 0x0A: subgroup_object
+		let flags = GroupFlags::decode(0x0A).unwrap();
+		assert!(flags.has_subgroup_object);
+
+		// 0x0C: explicit subgroup
+		let flags = GroupFlags::decode(0x0C).unwrap();
+		assert!(flags.has_subgroup);
+
+		// 0x0D: subgroup + extensions
+		let flags = GroupFlags::decode(0x0D).unwrap();
+		assert!(flags.has_subgroup);
+		assert!(flags.has_extensions);
+
+		// Invalid: 0x0E = subgroup + subgroup_object
+		assert!(GroupFlags::decode(0x0E).is_err());
+	}
+
+	#[test]
+	fn test_group_flags_legacy_decode() {
+		// Legacy 0x10-0x1D range is still accepted for backward compat
 		let flags = GroupFlags::decode(0x10).unwrap();
 		assert!(!flags.has_subgroup);
-		assert!(!flags.has_subgroup_object);
 		assert!(!flags.has_extensions);
-		assert!(!flags.has_end);
+		assert!(!flags.has_end); // legacy: bit 3 = 0
 		assert!(flags.has_priority);
-		assert_eq!(flags.encode().unwrap(), 0x10);
 
-		// Type 0x11: No subgroup field, Subgroup ID = 0, Extensions, No end
-		let flags = GroupFlags::decode(0x11).unwrap();
-		assert!(!flags.has_subgroup);
-		assert!(!flags.has_subgroup_object);
-		assert!(flags.has_extensions);
-		assert!(!flags.has_end);
-		assert_eq!(flags.encode().unwrap(), 0x11);
-
-		// Type 0x12: No subgroup field, Subgroup ID = First Object ID, No extensions, No end
-		let flags = GroupFlags::decode(0x12).unwrap();
-		assert!(!flags.has_subgroup);
-		assert!(flags.has_subgroup_object);
-		assert!(!flags.has_extensions);
-		assert!(!flags.has_end);
-		assert_eq!(flags.encode().unwrap(), 0x12);
-
-		// Type 0x13: No subgroup field, Subgroup ID = First Object ID, Extensions, No end
-		let flags = GroupFlags::decode(0x13).unwrap();
-		assert!(!flags.has_subgroup);
-		assert!(flags.has_subgroup_object);
-		assert!(flags.has_extensions);
-		assert!(!flags.has_end);
-		assert_eq!(flags.encode().unwrap(), 0x13);
-
-		// Type 0x14: Subgroup field present, No extensions, No end
-		let flags = GroupFlags::decode(0x14).unwrap();
-		assert!(flags.has_subgroup);
-		assert!(!flags.has_subgroup_object);
-		assert!(!flags.has_extensions);
-		assert!(!flags.has_end);
-		assert_eq!(flags.encode().unwrap(), 0x14);
-
-		// Type 0x15: Subgroup field present, Extensions, No end
-		let flags = GroupFlags::decode(0x15).unwrap();
-		assert!(flags.has_subgroup);
-		assert!(!flags.has_subgroup_object);
-		assert!(flags.has_extensions);
-		assert!(!flags.has_end);
-		assert_eq!(flags.encode().unwrap(), 0x15);
-
-		// Type 0x18: No subgroup field, Subgroup ID = 0, No extensions, End of group
 		let flags = GroupFlags::decode(0x18).unwrap();
-		assert!(!flags.has_subgroup);
-		assert!(!flags.has_subgroup_object);
-		assert!(!flags.has_extensions);
-		assert!(flags.has_end);
-		assert_eq!(flags.encode().unwrap(), 0x18);
+		assert!(flags.has_end); // legacy: bit 3 = 1
+		assert!(flags.has_priority);
 
-		// Type 0x19: No subgroup field, Subgroup ID = 0, Extensions, End of group
-		let flags = GroupFlags::decode(0x19).unwrap();
-		assert!(!flags.has_subgroup);
-		assert!(!flags.has_subgroup_object);
-		assert!(flags.has_extensions);
-		assert!(flags.has_end);
-		assert_eq!(flags.encode().unwrap(), 0x19);
-
-		// Type 0x1A: No subgroup field, Subgroup ID = First Object ID, No extensions, End of group
-		let flags = GroupFlags::decode(0x1A).unwrap();
-		assert!(!flags.has_subgroup);
-		assert!(flags.has_subgroup_object);
-		assert!(!flags.has_extensions);
-		assert!(flags.has_end);
-		assert_eq!(flags.encode().unwrap(), 0x1A);
-
-		// Type 0x1B: No subgroup field, Subgroup ID = First Object ID, Extensions, End of group
-		let flags = GroupFlags::decode(0x1B).unwrap();
-		assert!(!flags.has_subgroup);
-		assert!(flags.has_subgroup_object);
-		assert!(flags.has_extensions);
-		assert!(flags.has_end);
-		assert_eq!(flags.encode().unwrap(), 0x1B);
-
-		// Type 0x1C: Subgroup field present, No extensions, End of group
-		let flags = GroupFlags::decode(0x1C).unwrap();
-		assert!(flags.has_subgroup);
-		assert!(!flags.has_subgroup_object);
-		assert!(!flags.has_extensions);
-		assert!(flags.has_end);
-		assert_eq!(flags.encode().unwrap(), 0x1C);
-
-		// Type 0x1D: Subgroup field present, Extensions, End of group
 		let flags = GroupFlags::decode(0x1D).unwrap();
 		assert!(flags.has_subgroup);
-		assert!(!flags.has_subgroup_object);
 		assert!(flags.has_extensions);
 		assert!(flags.has_end);
-		assert_eq!(flags.encode().unwrap(), 0x1D);
 
-		// Invalid: Both has_subgroup and has_subgroup_object (would be 0x16)
+		// Invalid in legacy range too
 		assert!(GroupFlags::decode(0x16).is_err());
 	}
 
 	#[test]
 	fn test_group_flags_no_priority_range() {
-		// v15: 0x30 range = same flags as 0x10 range but no priority
+		// v15: 0x30 range = no priority, has_end at bit 3
 		let flags = GroupFlags::decode(0x30).unwrap();
 		assert!(!flags.has_priority);
 		assert!(!flags.has_subgroup);
 		assert!(!flags.has_extensions);
-		assert!(!flags.has_end);
+		assert!(!flags.has_end); // bit 3 = 0
 		assert_eq!(flags.encode().unwrap(), 0x30);
 
+		// 0x38 = no-priority with has_end
 		let flags = GroupFlags::decode(0x38).unwrap();
 		assert!(!flags.has_priority);
-		assert!(flags.has_end);
+		assert!(flags.has_end); // bit 3 = 1
 		assert_eq!(flags.encode().unwrap(), 0x38);
 
+		// 0x3D = no-priority, subgroup + extensions + has_end
 		let flags = GroupFlags::decode(0x3D).unwrap();
 		assert!(!flags.has_priority);
 		assert!(flags.has_subgroup);
