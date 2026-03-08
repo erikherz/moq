@@ -24,6 +24,12 @@ pub struct Catalog {
 	/// MSF version — always 1 for this draft.
 	pub version: u32,
 
+	/// ISO 8601 timestamp when this catalog was generated (SHOULD).
+	pub generated_at: Option<String>,
+
+	/// Target end-to-end latency in milliseconds (OPTIONAL).
+	pub target_latency: Option<u64>,
+
 	/// Array of track descriptions.
 	pub tracks: Vec<Track>,
 }
@@ -35,6 +41,9 @@ pub struct Catalog {
 pub struct Track {
 	/// Unique track name (case-sensitive).
 	pub name: String,
+
+	/// MOQT namespace for this track (REQUIRED per MSF draft-00).
+	pub namespace: Option<String>,
 
 	/// Packaging mode.
 	pub packaging: Packaging,
@@ -219,8 +228,11 @@ mod test {
 	fn serialize_video_track() {
 		let catalog = Catalog {
 			version: 1,
+			generated_at: None,
+			target_latency: None,
 			tracks: vec![Track {
 				name: "video0".to_string(),
+				namespace: None,
 				packaging: Packaging::Legacy,
 				is_live: true,
 				role: Some(Role::Video),
@@ -252,8 +264,11 @@ mod test {
 	fn serialize_audio_track() {
 		let catalog = Catalog {
 			version: 1,
+			generated_at: None,
+			target_latency: None,
 			tracks: vec![Track {
 				name: "audio0".to_string(),
+				namespace: None,
 				packaging: Packaging::Legacy,
 				is_live: true,
 				role: Some(Role::Audio),
@@ -319,6 +334,8 @@ mod test {
 	fn roundtrip_empty() {
 		let catalog = Catalog {
 			version: 1,
+			generated_at: None,
+			target_latency: None,
 			tracks: vec![],
 		};
 		let json = catalog.to_string().unwrap();
@@ -330,8 +347,11 @@ mod test {
 	fn cmaf_packaging() {
 		let catalog = Catalog {
 			version: 1,
+			generated_at: None,
+			target_latency: None,
 			tracks: vec![Track {
 				name: "hd".to_string(),
+				namespace: None,
 				packaging: Packaging::Cmaf,
 				is_live: true,
 				role: Some(Role::Video),

@@ -6,6 +6,11 @@ use base64::Engine;
 
 /// Convert a hang catalog to an MSF catalog.
 pub fn to_msf(catalog: &hang::Catalog) -> moq_msf::Catalog {
+	to_msf_with_namespace(catalog, None)
+}
+
+/// Convert a hang catalog to an MSF catalog with a namespace set on each track.
+pub fn to_msf_with_namespace(catalog: &hang::Catalog, namespace: Option<&str>) -> moq_msf::Catalog {
 	let mut tracks = Vec::new();
 
 	let has_multiple_video = catalog.video.renditions.len() > 1;
@@ -24,6 +29,7 @@ pub fn to_msf(catalog: &hang::Catalog) -> moq_msf::Catalog {
 
 		tracks.push(moq_msf::Track {
 			name: name.clone(),
+			namespace: namespace.map(|s| s.to_string()),
 			packaging,
 			is_live: true,
 			role: Some(moq_msf::Role::Video),
@@ -54,6 +60,7 @@ pub fn to_msf(catalog: &hang::Catalog) -> moq_msf::Catalog {
 
 		tracks.push(moq_msf::Track {
 			name: name.clone(),
+			namespace: namespace.map(|s| s.to_string()),
 			packaging,
 			is_live: true,
 			role: Some(moq_msf::Role::Audio),
@@ -70,7 +77,48 @@ pub fn to_msf(catalog: &hang::Catalog) -> moq_msf::Catalog {
 		});
 	}
 
-	moq_msf::Catalog { version: 1, tracks }
+	let generated_at = {
+		use std::time::SystemTime;
+		let now = SystemTime::now()
+			.duration_since(SystemTime::UNIX_EPOCH)
+			.unwrap_or_default()
+			.as_millis();
+		// ISO 8601 UTC: approximate from epoch millis
+		let secs = (now / 1000) as i64;
+		let ms = (now % 1000) as u32;
+		let (y, mo, d, h, mi, s) = epoch_to_utc(secs);
+		Some(format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}.{ms:03}Z"))
+	};
+
+	moq_msf::Catalog {
+		version: 1,
+		generated_at,
+		target_latency: Some(2000),
+		tracks,
+	}
+}
+
+/// Convert Unix epoch seconds to (year, month, day, hour, minute, second) UTC.
+fn epoch_to_utc(epoch: i64) -> (i64, u32, u32, u32, u32, u32) {
+	let secs_per_day: i64 = 86400;
+	let mut days = epoch / secs_per_day;
+	let day_secs = (epoch % secs_per_day) as u32;
+	let h = day_secs / 3600;
+	let mi = (day_secs % 3600) / 60;
+	let s = day_secs % 60;
+
+	// Days since 1970-01-01
+	days += 719468; // shift to 0000-03-01 epoch
+	let era = days / 146097;
+	let doe = days - era * 146097;
+	let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+	let y = yoe + era * 400;
+	let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+	let mp = (5 * doy + 2) / 153;
+	let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+	let mo = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+	let y = if mo <= 2 { y + 1 } else { y };
+	(y, mo, d, h, mi, s)
 }
 
 /// Publish the MSF catalog derived from a hang catalog to the given track.
@@ -148,10 +196,13 @@ mod test {
 		let msf = to_msf(&catalog);
 
 		assert_eq!(msf.version, 1);
+		assert!(msf.generated_at.is_some());
+		assert_eq!(msf.target_latency, Some(2000));
 		assert_eq!(msf.tracks.len(), 2);
 
 		let video = &msf.tracks[0];
 		assert_eq!(video.name, "video0.avc3");
+		assert_eq!(video.namespace, None);
 		assert_eq!(video.role, Some(moq_msf::Role::Video));
 		assert_eq!(video.packaging, moq_msf::Packaging::Legacy);
 		assert_eq!(video.codec, Some("avc3.64001f".to_string()));
