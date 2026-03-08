@@ -385,9 +385,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		}
 
 		stream.finish()?;
-		stream.closed().await?;
 
 		tracing::debug!(sequence = %msg.sequence, "finished group");
+
+		// Wait for the peer to acknowledge the stream closure.
+		// If this task is cancelled (e.g. by a group eviction), the QUIC layer
+		// still delivers the queued data + FIN since finish() was already called.
+		stream.closed().await?;
 
 		Ok(())
 	}
