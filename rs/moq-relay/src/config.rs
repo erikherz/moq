@@ -1,7 +1,7 @@
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
-use crate::{AuthConfig, ClusterConfig, WebConfig};
+use crate::{AuthConfig, ClusterConfig, DirectoryConfig, WebConfig};
 
 #[derive(Parser, Clone, Debug, Deserialize, Serialize, Default)]
 #[serde(deny_unknown_fields, default)]
@@ -25,6 +25,11 @@ pub struct Config {
 	#[command(flatten)]
 	#[serde(default)]
 	pub cluster: ClusterConfig,
+
+	/// Directory configuration (Worker-based relay registration).
+	#[command(flatten)]
+	#[serde(default)]
+	pub directory: DirectoryConfig,
 
 	/// Authentication configuration.
 	#[command(flatten)]
