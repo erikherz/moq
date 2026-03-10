@@ -14,8 +14,23 @@ pub struct Connection {
 impl Connection {
 	#[tracing::instrument("conn", skip_all, fields(id = self.id))]
 	pub async fn run(self) -> anyhow::Result<()> {
+		// Extract namespace from URL path for directory pull, then strip it
+		// so the session root stays empty (avoids double-scoping: erik01/erik01).
+		let pull_namespace = self.request.url().and_then(|url| {
+			let path = url.path().trim_start_matches('/').to_string();
+			if path.is_empty() { None } else { Some(path) }
+		});
+
 		let params = match self.request.url() {
-			Some(url) => AuthParams::from_url(url),
+			Some(url) => {
+				let mut p = AuthParams::from_url(url);
+				// Clear path so session root is empty — the namespace lives
+				// in the MoQ SUBSCRIBE, not the WebTransport URL scope.
+				if pull_namespace.is_some() {
+					p.path = "/".to_string();
+				}
+				p
+			}
 			None => AuthParams::default(),
 		};
 
@@ -31,12 +46,9 @@ impl Connection {
 
 		// On-demand pull: if the client's namespace isn't available locally,
 		// ask the directory for the origin and pull from it before proceeding.
-		// Namespace is extracted from the URL path (e.g. /erik01 → "erik01").
+		// Namespace was extracted from the URL path above (e.g. /erik01 → "erik01").
 		if !token.cluster {
-			let namespace = self.request.url().and_then(|url| {
-				let path = url.path().trim_start_matches('/').to_string();
-				if path.is_empty() { None } else { Some(path) }
-			});
+			let namespace = pull_namespace;
 			if let Some(ref namespace) = namespace {
 				if !namespace.is_empty() && self.cluster.get(namespace).is_none() {
 					if let Some(ref pull) = self.pull {
