@@ -20,7 +20,6 @@ pub struct PullManager {
 }
 
 struct PullState {
-	primary: OriginProducer,
 	secondary: OriginProducer,
 	client: moq_native::Client,
 	active_origins: HashMap<String, tokio::task::AbortHandle>,
@@ -28,14 +27,13 @@ struct PullState {
 
 impl PullManager {
 	pub fn new(
-		primary: OriginProducer,
+		_primary: OriginProducer,
 		secondary: OriginProducer,
 		client: moq_native::Client,
 		directory_root: Option<String>,
 	) -> Self {
 		PullManager {
 			inner: Arc::new(Mutex::new(PullState {
-				primary,
 				secondary,
 				client,
 				active_origins: HashMap::new(),
@@ -66,7 +64,6 @@ impl PullManager {
 
 		let url_str = origin_url.to_string();
 		let client = state.client.clone();
-		let primary = state.primary.clone();
 		let secondary = state.secondary.clone();
 
 		tracing::info!(origin = %url_str, ?forced_namespaces, "starting content pull from origin");
@@ -83,9 +80,11 @@ impl PullManager {
 					}
 				};
 
-				let mut conn = client
+				// Only consume from the origin — don't publish our primary back.
+			// Publishing primary to the origin causes duplicate-announce errors
+			// when the origin already has the namespace from moqcdn-publish.
+			let mut conn = client
 					.clone()
-					.with_publish(primary.consume())
 					.with_consume(secondary.clone());
 
 				if !forced_namespaces.is_empty() {
