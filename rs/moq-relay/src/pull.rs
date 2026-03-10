@@ -17,6 +17,8 @@ use url::Url;
 pub struct PullManager {
 	inner: Arc<Mutex<PullState>>,
 	directory_root: Option<String>,
+	/// This node's hostname, used to prevent self-pulls.
+	self_node: Option<String>,
 }
 
 struct PullState {
@@ -31,6 +33,7 @@ impl PullManager {
 		secondary: OriginProducer,
 		client: moq_native::Client,
 		directory_root: Option<String>,
+		self_node: Option<String>,
 	) -> Self {
 		PullManager {
 			inner: Arc::new(Mutex::new(PullState {
@@ -39,6 +42,7 @@ impl PullManager {
 				active_origins: HashMap::new(),
 			})),
 			directory_root,
+			self_node,
 		}
 	}
 
@@ -167,6 +171,14 @@ impl PullManager {
 		if origin_url.is_empty() {
 			tracing::info!(%namespace, "no origin_url in directory response");
 			return None;
+		}
+
+		// Don't pull from ourselves
+		if let Some(ref node) = self.self_node {
+			if origin_url.contains(node.as_str()) {
+				tracing::info!(%namespace, %origin_url, %node, "skipping self-pull");
+				return None;
+			}
 		}
 
 		tracing::info!(%namespace, %origin_url, "directory lookup found origin");

@@ -69,6 +69,7 @@ async fn main() -> anyhow::Result<()> {
 		cluster.secondary.clone(),
 		client,
 		directory_root.clone(),
+		config.directory.node.clone(),
 	);
 
 	// If directory mode is enabled, run it alongside the cluster.
