@@ -18,7 +18,7 @@ use bytes::Bytes;
 use clap::Parser;
 use tower_http::cors::{Any, CorsLayer};
 
-use crate::{Auth, AuthParams, Cluster};
+use crate::{Auth, AuthParams, Cluster, PullManager};
 
 #[derive(Parser, Clone, Debug, serde::Deserialize, serde::Serialize, Default)]
 #[serde(deny_unknown_fields, default)]
@@ -64,6 +64,7 @@ pub struct WebState {
 	pub cluster: Cluster,
 	pub tls_info: Arc<std::sync::RwLock<moq_native::ServerTlsInfo>>,
 	pub conn_id: AtomicU64,
+	pub pull: Option<PullManager>,
 }
 
 // Run a HTTP server using Axum
@@ -82,7 +83,8 @@ impl Web {
 			.route("/certificate.sha256", get(serve_fingerprint))
 			.route("/announced", get(serve_announced))
 			.route("/announced/{*prefix}", get(serve_announced))
-			.route("/fetch/{*path}", get(serve_fetch));
+			.route("/fetch/{*path}", get(serve_fetch))
+			.route("/api/warm", get(serve_warm));
 
 		// If WebSocket is enabled, add the WebSocket route.
 		#[cfg(feature = "websocket")]
@@ -401,6 +403,51 @@ struct ServeGroupError(moq_lite::Error);
 impl IntoResponse for ServeGroupError {
 	fn into_response(self) -> Response {
 		(StatusCode::INTERNAL_SERVER_ERROR, self.0.to_string()).into_response()
+	}
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct WarmQuery {
+	namespace: String,
+}
+
+/// Warm up this relay for a given namespace by looking up the origin in the
+/// directory and starting a pull connection.  Called by the player before
+/// connecting via WebTransport to an edge relay that may not have the content.
+async fn serve_warm(
+	Query(query): Query<WarmQuery>,
+	State(state): State<Arc<WebState>>,
+) -> axum::response::Result<Response> {
+	let Some(ref pull) = state.pull else {
+		return Ok((StatusCode::SERVICE_UNAVAILABLE, "directory not configured").into_response());
+	};
+
+	// Check if the namespace already exists locally
+	if state.cluster.get(&query.namespace).is_some() {
+		return Ok((StatusCode::OK, serde_json::json!({
+			"status": "ready",
+			"namespace": query.namespace,
+		}).to_string()).into_response());
+	}
+
+	// Look up the origin in the Worker directory and start pulling
+	match pull.lookup_and_pull(&query.namespace).await {
+		Some(origin_url) => {
+			// Give the pull a moment to establish and announce
+			tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+			Ok((StatusCode::OK, serde_json::json!({
+				"status": "pulling",
+				"namespace": query.namespace,
+				"origin_url": origin_url,
+			}).to_string()).into_response())
+		}
+		None => {
+			Ok((StatusCode::NOT_FOUND, serde_json::json!({
+				"status": "not_found",
+				"namespace": query.namespace,
+			}).to_string()).into_response())
+		}
 	}
 }
 

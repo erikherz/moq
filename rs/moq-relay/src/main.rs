@@ -13,6 +13,7 @@ mod cluster;
 mod config;
 mod connection;
 mod directory;
+mod pull;
 mod web;
 #[cfg(feature = "websocket")]
 mod websocket;
@@ -26,6 +27,7 @@ pub use cluster::*;
 pub use config::*;
 pub use connection::*;
 pub use directory::*;
+pub use pull::*;
 pub use web::*;
 
 #[tokio::main]
@@ -59,14 +61,23 @@ async fn main() -> anyhow::Result<()> {
 	let cloned = cluster.clone();
 	tokio::spawn(async move { cloned.run().await.expect("cluster failed") });
 
+	// Create a shared pull manager for directory-driven and warm-API pulls.
+	let has_directory = config.directory.is_enabled();
+	let directory_root = config.directory.root.clone();
+	let pull = PullManager::new(
+		cluster.primary.clone(),
+		cluster.secondary.clone(),
+		client,
+		directory_root.clone(),
+	);
+
 	// If directory mode is enabled, run it alongside the cluster.
 	// The directory handles registration with the Worker and pull-on-demand from origins.
-	if config.directory.is_enabled() {
+	if has_directory {
 		let directory = Directory::new(
 			config.directory,
 			cluster.primary.clone(),
-			cluster.secondary.clone(),
-			client,
+			pull.clone(),
 		);
 		tokio::spawn(async move {
 			if let Err(e) = directory.run().await {
@@ -82,6 +93,7 @@ async fn main() -> anyhow::Result<()> {
 			cluster: cluster.clone(),
 			tls_info: server.tls_info(),
 			conn_id: Default::default(),
+			pull: if directory_root.is_some() { Some(pull) } else { None },
 		},
 		config.web,
 	);
