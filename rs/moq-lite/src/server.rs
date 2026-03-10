@@ -100,6 +100,7 @@ impl Server {
 					self.publish.clone(),
 					self.consume.clone(),
 					ietf_v,
+					Vec::new(),
 				)?;
 
 				tracing::debug!(version = ?v, "connected");
@@ -138,6 +139,7 @@ impl Server {
 					self.publish.clone(),
 					self.consume.clone(),
 					lite::Version::Lite03,
+					Vec::new(),
 				)?;
 
 				return Ok(Session::new(session, lite::Version::Lite03.into()));
@@ -189,6 +191,7 @@ impl Server {
 					self.publish.clone(),
 					self.consume.clone(),
 					v,
+					Vec::new(),
 				)?;
 			}
 			Version::Ietf(v) => {
@@ -207,6 +210,7 @@ impl Server {
 					self.publish.clone(),
 					self.consume.clone(),
 					v,
+					Vec::new(),
 				)?;
 			}
 		};

@@ -1,5 +1,5 @@
 use crate::{
-	Error, OriginConsumer, OriginProducer,
+	Error, OriginConsumer, OriginProducer, PathOwned,
 	coding::{Reader, Stream},
 	ietf::{self, Control, RequestId},
 };
@@ -14,6 +14,7 @@ pub fn start<S: web_transport_trait::Session>(
 	publish: Option<OriginConsumer>,
 	subscribe: Option<OriginProducer>,
 	version: Version,
+	forced_namespaces: Vec<PathOwned>,
 ) -> Result<(), Error> {
 	web_async::spawn(async move {
 		match run(
@@ -24,6 +25,7 @@ pub fn start<S: web_transport_trait::Session>(
 			publish,
 			subscribe,
 			version,
+			forced_namespaces,
 		)
 		.await
 		{
@@ -53,11 +55,21 @@ async fn run<S: web_transport_trait::Session>(
 	publish: Option<OriginConsumer>,
 	subscribe: Option<OriginProducer>,
 	version: Version,
+	forced_namespaces: Vec<PathOwned>,
 ) -> Result<(), Error> {
 	let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 	let control = Control::new(tx, request_id_max, client, version);
 	let publisher = Publisher::new(session.clone(), publish, control.clone(), version);
-	let subscriber = Subscriber::new(session.clone(), subscribe, control.clone(), version);
+	let mut subscriber = Subscriber::new(session.clone(), subscribe, control.clone(), version);
+
+	// Pre-announce forced namespaces so we can subscribe to tracks
+	// on relays that never send PublishNamespace messages (e.g. Cloudflare).
+	for ns in forced_namespaces {
+		tracing::info!(namespace = %ns, "force-announcing namespace (IETF)");
+		if let Err(err) = subscriber.start_announce(ns.clone()) {
+			tracing::warn!(%err, namespace = %ns, "failed to force-announce namespace");
+		}
+	}
 
 	tokio::select! {
 		res = subscriber.clone().run() => res,

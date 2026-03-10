@@ -110,7 +110,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		}
 	}
 
-	fn start_announce(&mut self, path: PathOwned) -> Result<BroadcastProducer, Error> {
+	pub(super) fn start_announce(&mut self, path: PathOwned) -> Result<BroadcastProducer, Error> {
 		let Some(origin) = &self.origin else {
 			return Err(Error::InvalidRole);
 		};

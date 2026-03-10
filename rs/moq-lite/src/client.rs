@@ -11,6 +11,7 @@ pub struct Client {
 	publish: Option<OriginConsumer>,
 	consume: Option<OriginProducer>,
 	versions: Versions,
+	forced_namespaces: Vec<crate::PathOwned>,
 }
 
 impl Client {
@@ -30,6 +31,14 @@ impl Client {
 
 	pub fn with_versions(mut self, versions: Versions) -> Self {
 		self.versions = versions;
+		self
+	}
+
+	/// Force the subscriber to pre-announce these namespaces without waiting for
+	/// the remote to send ANNOUNCE/PublishNamespace messages.  This allows
+	/// subscribing to tracks on relays (like Cloudflare) that never announce.
+	pub fn with_forced_namespaces(mut self, namespaces: Vec<String>) -> Self {
+		self.forced_namespaces = namespaces.into_iter().map(|s| s.into()).collect();
 		self
 	}
 
@@ -102,6 +111,7 @@ impl Client {
 					self.publish.clone(),
 					self.consume.clone(),
 					ietf_v,
+					self.forced_namespaces.clone(),
 				)?;
 
 				tracing::debug!(version = ?v, "connected");
@@ -140,6 +150,7 @@ impl Client {
 					self.publish.clone(),
 					self.consume.clone(),
 					lite::Version::Lite03,
+					self.forced_namespaces.clone(),
 				)?;
 
 				return Ok(Session::new(session, lite::Version::Lite03.into()));
@@ -188,6 +199,7 @@ impl Client {
 					self.publish.clone(),
 					self.consume.clone(),
 					v,
+					self.forced_namespaces.clone(),
 				)?;
 			}
 			Version::Ietf(v) => {
@@ -206,6 +218,7 @@ impl Client {
 					self.publish.clone(),
 					self.consume.clone(),
 					v,
+					self.forced_namespaces.clone(),
 				)?;
 			}
 		}

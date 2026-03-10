@@ -1,4 +1,4 @@
-use crate::{Error, OriginConsumer, OriginProducer, coding::Stream, lite::SessionInfo};
+use crate::{Error, OriginConsumer, OriginProducer, PathOwned, coding::Stream, lite::SessionInfo};
 
 use super::{Publisher, Subscriber, Version};
 
@@ -13,9 +13,11 @@ pub fn start<S: web_transport_trait::Session>(
 	subscribe: Option<OriginProducer>,
 	// The version of the protocol to use.
 	version: Version,
+	// Namespaces to pre-announce without waiting for remote ANNOUNCE messages.
+	forced_namespaces: Vec<PathOwned>,
 ) -> Result<(), Error> {
 	let publisher = Publisher::new(session.clone(), publish, version);
-	let subscriber = Subscriber::new(session.clone(), subscribe, version);
+	let subscriber = Subscriber::new(session.clone(), subscribe, version, forced_namespaces);
 
 	web_async::spawn(async move {
 		let res = tokio::select! {

@@ -240,6 +240,11 @@ impl Client {
 		self
 	}
 
+	pub fn with_forced_namespaces(mut self, namespaces: Vec<String>) -> Self {
+		self.moq = self.moq.with_forced_namespaces(namespaces);
+		self
+	}
+
 	#[cfg(not(any(feature = "quinn", feature = "quiche", feature = "iroh")))]
 	pub async fn connect(&self, _url: Url) -> anyhow::Result<moq_lite::Session> {
 		anyhow::bail!("no QUIC backend compiled; enable quinn, quiche, or iroh feature");

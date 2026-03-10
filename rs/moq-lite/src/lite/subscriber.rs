@@ -23,16 +23,18 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	subscribes: Lock<HashMap<u64, TrackProducer>>,
 	next_id: Arc<atomic::AtomicU64>,
 	version: Version,
+	forced_namespaces: Vec<PathOwned>,
 }
 
 impl<S: web_transport_trait::Session> Subscriber<S> {
-	pub fn new(session: S, origin: Option<OriginProducer>, version: Version) -> Self {
+	pub fn new(session: S, origin: Option<OriginProducer>, version: Version, forced_namespaces: Vec<PathOwned>) -> Self {
 		Self {
 			session,
 			origin,
 			subscribes: Default::default(),
 			next_id: Default::default(),
 			version,
+			forced_namespaces,
 		}
 	}
 
@@ -78,6 +80,17 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			return Ok(());
 		}
 
+		let mut producers = HashMap::new();
+
+		// Pre-announce forced namespaces so we can subscribe to tracks
+		// on relays that never send ANNOUNCE messages (e.g. Cloudflare).
+		for ns in std::mem::take(&mut self.forced_namespaces) {
+			tracing::info!(namespace = %ns, "force-announcing namespace");
+			if let Err(err) = self.start_announce(ns.clone(), &mut producers) {
+				tracing::warn!(%err, namespace = %ns, "failed to force-announce namespace");
+			}
+		}
+
 		let mut stream = Stream::open(&self.session, self.version).await?;
 		stream.writer.encode(&lite::ControlType::Announce).await?;
 
@@ -87,8 +100,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// TODO This should actually ask for each root.
 		let msg = lite::AnnouncePlease { prefix: "".into() };
 		stream.writer.encode(&msg).await?;
-
-		let mut producers = HashMap::new();
 
 		match self.version {
 			Version::Lite01 | Version::Lite02 => {

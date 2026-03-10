@@ -47,6 +47,17 @@ impl PullManager {
 	/// Start pulling content from a remote origin relay.
 	/// Returns true if a new pull was started, false if already pulling from this origin.
 	pub async fn start_pull(&self, origin_url: &str) -> bool {
+		self.start_pull_inner(origin_url, Vec::new()).await
+	}
+
+	/// Start pulling content from a remote origin relay, forcing specific namespaces.
+	/// This allows subscribing to content on relays that don't proactively announce
+	/// namespaces (e.g. Cloudflare).
+	pub async fn start_pull_namespace(&self, origin_url: &str, namespace: &str) -> bool {
+		self.start_pull_inner(origin_url, vec![namespace.to_string()]).await
+	}
+
+	async fn start_pull_inner(&self, origin_url: &str, forced_namespaces: Vec<String>) -> bool {
 		let mut state = self.inner.lock().await;
 
 		if state.active_origins.contains_key(origin_url) {
@@ -58,7 +69,7 @@ impl PullManager {
 		let primary = state.primary.clone();
 		let secondary = state.secondary.clone();
 
-		tracing::info!(origin = %url_str, "starting content pull from origin");
+		tracing::info!(origin = %url_str, ?forced_namespaces, "starting content pull from origin");
 
 		let handle = tokio::spawn(async move {
 			let mut backoff = 1u64;
@@ -72,13 +83,16 @@ impl PullManager {
 					}
 				};
 
-				match client
+				let mut conn = client
 					.clone()
 					.with_publish(primary.consume())
-					.with_consume(secondary.clone())
-					.connect(url)
-					.await
-				{
+					.with_consume(secondary.clone());
+
+				if !forced_namespaces.is_empty() {
+					conn = conn.with_forced_namespaces(forced_namespaces.clone());
+				}
+
+				match conn.connect(url).await {
 					Ok(session) => {
 						backoff = 1;
 						tracing::info!(origin = %url_str, "pulling content from origin");
@@ -158,11 +172,9 @@ impl PullManager {
 
 		tracing::info!(%namespace, %origin_url, "directory lookup found origin");
 
-		if self.start_pull(origin_url).await {
-			Some(origin_url.to_string())
-		} else {
-			// Already pulling — still return the URL
-			Some(origin_url.to_string())
-		}
+		// Use namespace-specific pull so the subscriber pre-announces the namespace,
+		// enabling subscriptions even on relays that don't send ANNOUNCE (e.g. CF).
+		self.start_pull_namespace(origin_url, namespace).await;
+		Some(origin_url.to_string())
 	}
 }
