@@ -1,4 +1,4 @@
-use crate::{Auth, AuthParams, Cluster};
+use crate::{Auth, AuthParams, Cluster, PullManager};
 
 use axum::http;
 use moq_native::Request;
@@ -8,6 +8,7 @@ pub struct Connection {
 	pub request: Request,
 	pub cluster: Cluster,
 	pub auth: Auth,
+	pub pull: Option<PullManager>,
 }
 
 impl Connection {
@@ -27,6 +28,29 @@ impl Connection {
 				return Err(err.into());
 			}
 		};
+
+		// On-demand pull: if this is a non-cluster subscriber and the namespace
+		// doesn't exist locally, look it up in the directory and pull from origin.
+		let root_str = token.root.as_str();
+		if !token.cluster && !root_str.is_empty() {
+			if self.cluster.get(root_str).is_none() {
+				if let Some(ref pull) = self.pull {
+					tracing::info!(namespace = %root_str, "namespace not local, looking up directory");
+					if let Some(origin_url) = pull.lookup_and_pull(root_str).await {
+						tracing::info!(namespace = %root_str, %origin_url, "pulling from origin, waiting for content");
+						// Wait up to 5s for the namespace to appear in the combined origin.
+						let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+						while tokio::time::Instant::now() < deadline {
+							if self.cluster.get(root_str).is_some() {
+								tracing::info!(namespace = %root_str, "namespace available after pull");
+								break;
+							}
+							tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+						}
+					}
+				}
+			}
+		}
 
 		let publish = self.cluster.publisher(&token);
 		let subscribe = self.cluster.subscriber(&token);

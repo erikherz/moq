@@ -88,6 +88,8 @@ async fn main() -> anyhow::Result<()> {
 	}
 
 	// Create a web server too.
+	let conn_pull = if directory_root.is_some() { Some(pull.clone()) } else { None };
+
 	let web = Web::new(
 		WebState {
 			auth: auth.clone(),
@@ -118,6 +120,7 @@ async fn main() -> anyhow::Result<()> {
 			request,
 			cluster: cluster.clone(),
 			auth: auth.clone(),
+			pull: conn_pull.clone(),
 		};
 
 		conn_id += 1;
