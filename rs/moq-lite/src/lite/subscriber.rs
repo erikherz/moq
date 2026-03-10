@@ -142,9 +142,9 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		let broadcast = Broadcast::produce();
 
-		// Make sure the peer doesn't double announce.
+		// Skip if already announced (e.g. forced namespace that the origin also announces).
 		match producers.entry(path.to_owned()) {
-			Entry::Occupied(_) => return Err(Error::Duplicate),
+			Entry::Occupied(_) => return Ok(()),
 			Entry::Vacant(entry) => entry.insert(broadcast.clone()),
 		};
 
