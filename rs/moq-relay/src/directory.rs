@@ -54,19 +54,17 @@ impl DirectoryConfig {
 pub struct Directory {
 	config: DirectoryConfig,
 	primary: OriginProducer,
-	pull: PullManager,
 }
 
 impl Directory {
 	pub fn new(
 		config: DirectoryConfig,
 		primary: OriginProducer,
-		pull: PullManager,
+		_pull: PullManager,
 	) -> Self {
 		Directory {
 			config,
 			primary,
-			pull,
 		}
 	}
 
@@ -198,20 +196,16 @@ impl Directory {
 					return;
 				}
 
-				tracing::info!(%namespace, %origin_node, %origin_url, "origin announced via directory");
-
-				// Start a pull connection to this origin (one connection per origin, not per namespace)
-				self.pull.start_pull(origin_url).await;
+				// Just log — don't auto-pull. Content is pulled lazily when a
+				// viewer connects (via the cluster mesh or /api/warm for
+				// unregistered third-party relays).
+				tracing::info!(%namespace, %origin_node, %origin_url, "origin announced via directory (no auto-pull)");
 			}
 			Some("origin_disconnected") => {
 				let origin_url = data["origin_url"].as_str().unwrap_or("");
 				let origin_node = data["node"].as_str().unwrap_or("");
 
 				tracing::info!(%origin_node, %origin_url, "origin disconnected from directory");
-
-				if !origin_url.is_empty() {
-					self.pull.stop_pull(origin_url).await;
-				}
 			}
 			_ => {
 				tracing::debug!(msg = %text, "directory message");
