@@ -430,21 +430,7 @@ async fn serve_warm(
 	State(state): State<Arc<WebState>>,
 ) -> axum::response::Result<Response> {
 	// Check if the namespace exists locally (origin relay case).
-	// Poll briefly — the ANNOUNCE from moqcdn-publish may still be in flight.
-	let local_broadcast = {
-		let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-		loop {
-			if let Some(b) = state.cluster.get(&query.namespace) {
-				break Some(b);
-			}
-			if tokio::time::Instant::now() >= deadline {
-				break None;
-			}
-			tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-		}
-	};
-
-	if let Some(broadcast) = local_broadcast {
+	if let Some(broadcast) = state.cluster.get(&query.namespace) {
 		// Check if we already have a drain running for this namespace
 		{
 			let warms = state.active_warms.lock().await;
