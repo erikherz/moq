@@ -20,6 +20,9 @@ use tower_http::cors::{Any, CorsLayer};
 
 use crate::{Auth, AuthParams, Cluster, PullManager};
 
+use std::collections::HashSet;
+use tokio::sync::Mutex;
+
 #[derive(Parser, Clone, Debug, serde::Deserialize, serde::Serialize, Default)]
 #[serde(deny_unknown_fields, default)]
 pub struct WebConfig {
@@ -65,6 +68,8 @@ pub struct WebState {
 	pub tls_info: Arc<std::sync::RwLock<moq_native::ServerTlsInfo>>,
 	pub conn_id: AtomicU64,
 	pub pull: Option<PullManager>,
+	/// Tracks which namespaces have active warm drain tasks to avoid duplicates.
+	pub active_warms: Mutex<HashSet<String>>,
 }
 
 // Run a HTTP server using Axum
@@ -411,31 +416,77 @@ struct WarmQuery {
 	namespace: String,
 }
 
-/// Warm up this relay for a given namespace by looking up the origin in the
-/// directory and starting a pull connection.  Called by the player before
-/// connecting via WebTransport to an edge relay that may not have the content.
+/// Warm up this relay for a given namespace.
+///
+/// Two modes:
+/// - **Origin (local)**: namespace exists locally (publisher connected).  Spawn
+///   an internal drain subscriber that subscribes to catalog + media tracks,
+///   forcing media to flow from the publisher into the relay's cache *before*
+///   any real viewer connects.
+/// - **Edge (remote)**: namespace doesn't exist locally.  Look up the origin in
+///   the Worker directory and start a pull connection.
 async fn serve_warm(
 	Query(query): Query<WarmQuery>,
 	State(state): State<Arc<WebState>>,
 ) -> axum::response::Result<Response> {
-	let Some(ref pull) = state.pull else {
-		return Ok((StatusCode::SERVICE_UNAVAILABLE, "directory not configured").into_response());
-	};
+	// Check if the namespace already exists locally (origin relay case)
+	if let Some(broadcast) = state.cluster.get(&query.namespace) {
+		// Check if we already have a drain running for this namespace
+		{
+			let warms = state.active_warms.lock().await;
+			if warms.contains(&query.namespace) {
+				return Ok((StatusCode::OK, serde_json::json!({
+					"status": "ready",
+					"namespace": query.namespace,
+					"warm": true,
+				}).to_string()).into_response());
+			}
+		}
 
-	// Check if the namespace already exists locally
-	if state.cluster.get(&query.namespace).is_some() {
+		// Spawn an internal drain subscriber to force media flow
+		let ns = query.namespace.clone();
+		let active_warms = state.active_warms.lock().await;
+		// Double-check after acquiring lock
+		if active_warms.contains(&ns) {
+			return Ok((StatusCode::OK, serde_json::json!({
+				"status": "ready",
+				"namespace": ns,
+				"warm": true,
+			}).to_string()).into_response());
+		}
+		drop(active_warms);
+
+		let ns_clone = ns.clone();
+		let state_clone = state.clone();
+		tokio::spawn(async move {
+			state_clone.active_warms.lock().await.insert(ns_clone.clone());
+			tracing::info!(namespace = %ns_clone, "starting warm drain subscriber");
+
+			if let Err(e) = run_warm_drain(broadcast, &ns_clone).await {
+				tracing::warn!(%e, namespace = %ns_clone, "warm drain ended");
+			}
+
+			state_clone.active_warms.lock().await.remove(&ns_clone);
+			tracing::info!(namespace = %ns_clone, "warm drain stopped");
+		});
+
 		return Ok((StatusCode::OK, serde_json::json!({
-			"status": "ready",
-			"namespace": query.namespace,
+			"status": "warming",
+			"namespace": ns,
 		}).to_string()).into_response());
 	}
 
-	// Look up the origin in the Worker directory and start pulling
+	// Edge relay case: look up origin in the Worker directory and start pulling
+	let Some(ref pull) = state.pull else {
+		return Ok((StatusCode::NOT_FOUND, serde_json::json!({
+			"status": "not_found",
+			"namespace": query.namespace,
+		}).to_string()).into_response());
+	};
+
 	match pull.lookup_and_pull(&query.namespace).await {
 		Some(origin_url) => {
 			// Wait for the namespace to appear in the combined origin (up to 5s).
-			// The pull connects to the origin, which announces namespaces that flow
-			// through secondary → run_combined → combined.
 			let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
 			let mut ready = false;
 			while tokio::time::Instant::now() < deadline {
@@ -462,6 +513,101 @@ async fn serve_warm(
 			}).to_string()).into_response())
 		}
 	}
+}
+
+/// Subscribe to catalog + media tracks on a local broadcast and drain all data.
+/// This forces the relay to send SUBSCRIBE to the publisher, causing media to
+/// flow into the relay's group cache before any real viewer connects.
+async fn run_warm_drain(broadcast: moq_lite::BroadcastConsumer, namespace: &str) -> anyhow::Result<()> {
+	// Subscribe to catalog track
+	let catalog_track = moq_lite::Track { name: "catalog".to_string(), priority: 0 };
+	let mut catalog = broadcast.subscribe_track(&catalog_track)
+		.map_err(|e| anyhow::anyhow!("failed to subscribe to catalog: {e}"))?;
+
+	tracing::info!(%namespace, "warm: subscribed to catalog");
+
+	// Read first catalog group to discover media track names
+	let track_names: Vec<String> = loop {
+		match catalog.next_group().await {
+			Ok(Some(mut group)) => {
+				if let Ok(Some(mut frame)) = group.next_frame().await {
+					let data = frame.read_all().await
+						.map_err(|e| anyhow::anyhow!("failed to read catalog frame: {e}"))?;
+					let json: serde_json::Value = serde_json::from_slice(&data)?;
+					let names: Vec<String> = json["tracks"]
+						.as_array()
+						.unwrap_or(&vec![])
+						.iter()
+						.filter(|t| {
+							let pkg = t["packaging"].as_str().unwrap_or("");
+							pkg == "cmaf" || pkg == "loc"
+						})
+						.filter_map(|t| t["name"].as_str().map(String::from))
+						.collect();
+					tracing::info!(%namespace, ?names, "warm: discovered {} media tracks", names.len());
+					break names;
+				}
+			}
+			Ok(None) => return Err(anyhow::anyhow!("catalog track closed without data")),
+			Err(e) => return Err(anyhow::anyhow!("catalog error: {e}")),
+		}
+	};
+
+	// Subscribe to each media track and spawn drain tasks
+	let mut handles = Vec::new();
+	for name in &track_names {
+		let track = moq_lite::Track { name: name.clone(), priority: 0 };
+		match broadcast.subscribe_track(&track) {
+			Ok(mut consumer) => {
+				tracing::info!(%namespace, track = %name, "warm: subscribed to track");
+				let ns = namespace.to_string();
+				let tn = name.clone();
+				handles.push(tokio::spawn(async move {
+					loop {
+						match consumer.next_group().await {
+							Ok(Some(mut group)) => {
+								while let Ok(Some(mut frame)) = group.next_frame().await {
+									// Read and discard — the point is to trigger media flow
+									let _ = frame.read_all().await;
+								}
+							}
+							Ok(None) => {
+								tracing::info!(namespace = %ns, track = %tn, "warm: track closed");
+								break;
+							}
+							Err(e) => {
+								tracing::warn!(%e, namespace = %ns, track = %tn, "warm: track error");
+								break;
+							}
+						}
+					}
+				}));
+			}
+			Err(e) => {
+				tracing::warn!(%e, %namespace, track = %name, "warm: failed to subscribe to track");
+			}
+		}
+	}
+
+	// Also keep draining catalog updates
+	let ns = namespace.to_string();
+	handles.push(tokio::spawn(async move {
+		loop {
+			match catalog.next_group().await {
+				Ok(Some(mut group)) => {
+					while let Ok(Some(mut frame)) = group.next_frame().await {
+						let _ = frame.read_all().await;
+					}
+				}
+				Ok(None) | Err(_) => break,
+			}
+		}
+		tracing::info!(namespace = %ns, "warm: catalog drain ended");
+	}));
+
+	// Wait for all drain tasks (runs until publisher disconnects)
+	futures::future::join_all(handles).await;
+	Ok(())
 }
 
 fn default_true() -> bool {

@@ -94,6 +94,7 @@ async fn main() -> anyhow::Result<()> {
 			tls_info: server.tls_info(),
 			conn_id: Default::default(),
 			pull: if directory_root.is_some() { Some(pull) } else { None },
+			active_warms: Default::default(),
 		},
 		config.web,
 	);
