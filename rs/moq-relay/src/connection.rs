@@ -29,14 +29,15 @@ impl Connection {
 			}
 		};
 
-		// On-demand pull: extract namespace from ?ns= query parameter.
-		// The player passes this so the relay can pull content from the origin
-		// before the session starts, without affecting the auth root scope.
+		// On-demand pull: if the client's namespace isn't available locally,
+		// ask the directory for the origin and pull from it before proceeding.
+		// Namespace is extracted from the URL path (e.g. /erik01 → "erik01").
 		if !token.cluster {
-			let ns = self.request.url().and_then(|url| {
-				url.query_pairs().find(|(k, _)| k == "ns").map(|(_, v)| v.to_string())
+			let namespace = self.request.url().and_then(|url| {
+				let path = url.path().trim_start_matches('/').to_string();
+				if path.is_empty() { None } else { Some(path) }
 			});
-			if let Some(ref namespace) = ns {
+			if let Some(ref namespace) = namespace {
 				if !namespace.is_empty() && self.cluster.get(namespace).is_none() {
 					if let Some(ref pull) = self.pull {
 						tracing::info!(%namespace, "namespace not local, looking up directory");
