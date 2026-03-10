@@ -433,11 +433,24 @@ async fn serve_warm(
 	// Look up the origin in the Worker directory and start pulling
 	match pull.lookup_and_pull(&query.namespace).await {
 		Some(origin_url) => {
-			// Give the pull a moment to establish and announce
-			tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+			// Wait for the namespace to appear in the combined origin (up to 5s).
+			// The pull connects to the origin, which announces namespaces that flow
+			// through secondary → run_combined → combined.
+			let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+			let mut ready = false;
+			while tokio::time::Instant::now() < deadline {
+				if state.cluster.get(&query.namespace).is_some() {
+					ready = true;
+					break;
+				}
+				tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+			}
+
+			let status = if ready { "ready" } else { "pulling" };
+			tracing::info!(namespace = %query.namespace, %status, %origin_url, "warm complete");
 
 			Ok((StatusCode::OK, serde_json::json!({
-				"status": "pulling",
+				"status": status,
 				"namespace": query.namespace,
 				"origin_url": origin_url,
 			}).to_string()).into_response())
