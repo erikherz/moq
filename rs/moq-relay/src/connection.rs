@@ -29,23 +29,27 @@ impl Connection {
 			}
 		};
 
-		// On-demand pull: if this is a non-cluster subscriber and the namespace
-		// doesn't exist locally, look it up in the directory and pull from origin.
-		let root_str = token.root.as_str();
-		if !token.cluster && !root_str.is_empty() {
-			if self.cluster.get(root_str).is_none() {
-				if let Some(ref pull) = self.pull {
-					tracing::info!(namespace = %root_str, "namespace not local, looking up directory");
-					if let Some(origin_url) = pull.lookup_and_pull(root_str).await {
-						tracing::info!(namespace = %root_str, %origin_url, "pulling from origin, waiting for content");
-						// Wait up to 5s for the namespace to appear in the combined origin.
-						let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
-						while tokio::time::Instant::now() < deadline {
-							if self.cluster.get(root_str).is_some() {
-								tracing::info!(namespace = %root_str, "namespace available after pull");
-								break;
+		// On-demand pull: extract namespace from ?ns= query parameter.
+		// The player passes this so the relay can pull content from the origin
+		// before the session starts, without affecting the auth root scope.
+		if !token.cluster {
+			let ns = self.request.url().and_then(|url| {
+				url.query_pairs().find(|(k, _)| k == "ns").map(|(_, v)| v.to_string())
+			});
+			if let Some(ref namespace) = ns {
+				if !namespace.is_empty() && self.cluster.get(namespace).is_none() {
+					if let Some(ref pull) = self.pull {
+						tracing::info!(%namespace, "namespace not local, looking up directory");
+						if let Some(origin_url) = pull.lookup_and_pull(namespace).await {
+							tracing::info!(%namespace, %origin_url, "pulling from origin, waiting for content");
+							let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(5);
+							while tokio::time::Instant::now() < deadline {
+								if self.cluster.get(namespace).is_some() {
+									tracing::info!(%namespace, "namespace available after pull");
+									break;
+								}
+								tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 							}
-							tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 						}
 					}
 				}
