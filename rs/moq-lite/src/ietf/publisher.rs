@@ -250,7 +250,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				track_alias: request_id.0, // NOTE: using track alias as request id for now
 				group_id: sequence,
 				sub_group_id: 0,
-				publisher_priority: 0,
+				publisher_priority: track.info.priority,
 				flags: Default::default(),
 			};
 
@@ -285,6 +285,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		}
 	}
 
+	/// Number of leading objects in each group that retain the subscriber's
+	/// requested priority.  After this many objects the stream drops to a
+	/// lower priority so that new groups (which start with an IDR) on any
+	/// track can preempt the tail of an older group.
+	const IDR_OBJECT_COUNT: u32 = 2;
+
 	async fn run_group(
 		session: S,
 		msg: ietf::GroupHeader,
@@ -303,6 +309,13 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		tracing::trace!(?msg, "sending group header");
 
+		// Priority for the non-IDR tail of the group.
+		// Sits below the subscriber priority so a new group's IDR on any
+		// track will preempt these trailing frames via QUIC scheduling.
+		let tail_priority = priority.saturating_sub(64).max(1);
+
+		let mut object_count: u32 = 0;
+
 		loop {
 			let frame = tokio::select! {
 				biased;
@@ -314,6 +327,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				Some(frame) => frame,
 				None => break,
 			};
+
+			object_count += 1;
+
+			// After the IDR objects, drop stream priority so new groups
+			// (which open at full priority) preempt the remainder.
+			if object_count == Self::IDR_OBJECT_COUNT + 1 {
+				stream.set_priority(tail_priority);
+			}
 
 			// object id delta is always 0.
 			stream.encode(&0u64).await?;

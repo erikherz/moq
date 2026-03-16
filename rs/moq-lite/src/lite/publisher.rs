@@ -327,6 +327,12 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		}
 	}
 
+	/// Number of leading objects in each group that retain the subscriber's
+	/// requested priority.  After this many objects the stream drops to a
+	/// lower priority so that new groups (which start with an IDR) on any
+	/// track can preempt the tail of an older group.
+	const IDR_OBJECT_COUNT: u32 = 2;
+
 	async fn serve_group(
 		session: S,
 		msg: lite::Group,
@@ -337,10 +343,16 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// TODO add a way to open in priority order.
 		let stream = session.open_uni().await.map_err(Error::from_transport)?;
 
+		let base_priority = priority.current();
 		let mut stream = Writer::new(stream, version);
-		stream.set_priority(priority.current());
+		stream.set_priority(base_priority);
 		stream.encode(&lite::DataType::Group).await?;
 		stream.encode(&msg).await?;
+
+		// Priority for the non-IDR tail of the group.
+		let tail_priority = base_priority.saturating_sub(64).max(1);
+
+		let mut object_count: u32 = 0;
 
 		loop {
 			let frame = tokio::select! {
@@ -358,6 +370,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				Some(frame) => frame,
 				None => break,
 			};
+
+			object_count += 1;
+
+			// After the IDR objects, drop stream priority so new groups
+			// (which open at full priority) preempt the remainder.
+			if object_count == Self::IDR_OBJECT_COUNT + 1 {
+				stream.set_priority(tail_priority);
+			}
 
 			tracing::trace!(size = %frame.info.size, "writing frame");
 
