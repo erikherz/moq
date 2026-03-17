@@ -254,6 +254,8 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				flags: Default::default(),
 			};
 
+			let first_group = new_sequence.is_none();
+
 			// Spawn a task to serve this group, ignoring any errors because they don't really matter.
 			// TODO add some logging at least.
 			let handle = Box::pin(Self::run_group(
@@ -262,6 +264,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				track.info.priority,
 				group,
 				version,
+				first_group,
 			));
 
 			// Terminate the old group if it's still running.
@@ -297,6 +300,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		priority: u8,
 		mut group: GroupConsumer,
 		version: Version,
+		log_priorities: bool,
 	) -> Result<(), Error> {
 		// TODO add a way to open in priority order.
 		let mut stream = session.open_uni().await.map_err(Error::from_transport)?;
@@ -313,6 +317,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		// Sits below the subscriber priority so a new group's IDR on any
 		// track will preempt these trailing frames via QUIC scheduling.
 		let tail_priority = priority.saturating_sub(64).max(1);
+
+		if log_priorities {
+			tracing::info!(group = %msg.group_id, idr_priority = %priority, tail_priority = %tail_priority, idr_objects = Self::IDR_OBJECT_COUNT, "priority scheme for first group");
+		}
 
 		let mut object_count: u32 = 0;
 
@@ -334,6 +342,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			// (which open at full priority) preempt the remainder.
 			if object_count == Self::IDR_OBJECT_COUNT + 1 {
 				stream.set_priority(tail_priority);
+			}
+
+			if log_priorities {
+				let current_priority = if object_count <= Self::IDR_OBJECT_COUNT { priority } else { tail_priority };
+				tracing::info!(group = %msg.group_id, object = %object_count, priority = %current_priority, size = %frame.info.size, "object priority");
 			}
 
 			// object id delta is always 0.
