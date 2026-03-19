@@ -27,9 +27,6 @@ pub struct Catalog {
 	/// ISO 8601 timestamp when this catalog was generated (SHOULD).
 	pub generated_at: Option<String>,
 
-	/// Target end-to-end latency in milliseconds (OPTIONAL).
-	pub target_latency: Option<u64>,
-
 	/// Array of track descriptions.
 	pub tracks: Vec<Track>,
 }
@@ -92,6 +89,9 @@ pub struct Track {
 
 	/// Event type identifier for eventtimeline tracks (CMSF).
 	pub event_type: Option<String>,
+
+	/// Target end-to-end latency in milliseconds (OPTIONAL, track-level per MSF draft-00 §5.1.16).
+	pub target_latency: Option<u64>,
 }
 
 impl Catalog {
@@ -238,7 +238,6 @@ mod test {
 		let catalog = Catalog {
 			version: 1,
 			generated_at: None,
-			target_latency: None,
 			tracks: vec![Track {
 				name: "video0".to_string(),
 				namespace: None,
@@ -258,6 +257,7 @@ mod test {
 				max_grp_sap_starting_type: None,
 				max_obj_sap_starting_type: None,
 				event_type: None,
+				target_latency: None,
 			}],
 		};
 
@@ -277,7 +277,6 @@ mod test {
 		let catalog = Catalog {
 			version: 1,
 			generated_at: None,
-			target_latency: None,
 			tracks: vec![Track {
 				name: "audio0".to_string(),
 				namespace: None,
@@ -297,6 +296,7 @@ mod test {
 				max_grp_sap_starting_type: None,
 				max_obj_sap_starting_type: None,
 				event_type: None,
+				target_latency: None,
 			}],
 		};
 
@@ -350,7 +350,6 @@ mod test {
 		let catalog = Catalog {
 			version: 1,
 			generated_at: None,
-			target_latency: None,
 			tracks: vec![],
 		};
 		let json = catalog.to_string().unwrap();
@@ -363,7 +362,6 @@ mod test {
 		let catalog = Catalog {
 			version: 1,
 			generated_at: None,
-			target_latency: None,
 			tracks: vec![Track {
 				name: "hd".to_string(),
 				namespace: None,
@@ -383,6 +381,7 @@ mod test {
 				max_grp_sap_starting_type: Some(1),
 				max_obj_sap_starting_type: Some(1),
 				event_type: None,
+				target_latency: None,
 			}],
 		};
 

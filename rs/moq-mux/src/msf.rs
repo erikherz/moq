@@ -49,6 +49,7 @@ pub fn to_msf_with_namespace(catalog: &hang::Catalog, namespace: Option<&str>) -
 			max_grp_sap_starting_type: if is_cmaf { Some(1) } else { None },
 			max_obj_sap_starting_type: if is_cmaf { Some(1) } else { None },
 			event_type: None,
+			target_latency: None,
 		});
 	}
 
@@ -86,6 +87,7 @@ pub fn to_msf_with_namespace(catalog: &hang::Catalog, namespace: Option<&str>) -
 			max_grp_sap_starting_type: None,
 			max_obj_sap_starting_type: None,
 			event_type: None,
+			target_latency: None,
 		});
 	}
 
@@ -105,7 +107,6 @@ pub fn to_msf_with_namespace(catalog: &hang::Catalog, namespace: Option<&str>) -
 	moq_msf::Catalog {
 		version: 1,
 		generated_at,
-		target_latency: Some(2000),
 		tracks,
 	}
 }
@@ -134,6 +135,7 @@ pub fn sap_timeline_track(name: &str, namespace: Option<&str>) -> moq_msf::Track
 		max_grp_sap_starting_type: None,
 		max_obj_sap_starting_type: None,
 		event_type: Some(CMSF_SAP_EVENT_TYPE.to_string()),
+		target_latency: None,
 	}
 }
 
@@ -244,7 +246,6 @@ mod test {
 
 		assert_eq!(msf.version, 1);
 		assert!(msf.generated_at.is_some());
-		assert_eq!(msf.target_latency, Some(2000));
 		assert_eq!(msf.tracks.len(), 2);
 
 		let video = &msf.tracks[0];
