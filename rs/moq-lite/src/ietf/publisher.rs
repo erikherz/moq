@@ -441,6 +441,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let mut sequence: u64 = 0;
 		let mut interval = tokio::time::interval(Duration::from_secs(1));
 		let mut prev_ingest_bytes: Option<u64> = None;
+		let mut prev_bytes_sent: Option<u64> = None;
 
 		loop {
 			tokio::select! {
@@ -470,6 +471,16 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			};
 			prev_ingest_bytes = curr_ingest;
 
+			// Compute send throughput from delta bytes_sent / 1 second.
+			let send_throughput_mbps = match (bytes_sent, prev_bytes_sent) {
+				(Some(curr), Some(prev)) => {
+					let delta = curr.saturating_sub(prev);
+					format!("{:.1}", delta as f64 * 8.0 / 1_000_000.0)
+				}
+				_ => "null".to_string(),
+			};
+			prev_bytes_sent = bytes_sent;
+
 			let timestamp = SystemTime::now()
 				.duration_since(UNIX_EPOCH)
 				.unwrap_or_default()
@@ -489,9 +500,10 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			};
 
 			let json = format!(
-				r#"{{"rtt_ms":{},"send_rate_mbps":{},"receive_rate_mbps":{},"bytes_sent":{},"bytes_lost":{},"packets_sent":{},"packets_lost":{},"timestamp":{},"version":"{}"}}"#,
+				r#"{{"rtt_ms":{},"send_rate_mbps":{},"send_throughput_mbps":{},"receive_rate_mbps":{},"bytes_sent":{},"bytes_lost":{},"packets_sent":{},"packets_lost":{},"timestamp":{},"version":"{}"}}"#,
 				rtt_ms,
 				send_rate_mbps,
+				send_throughput_mbps,
 				receive_rate_mbps,
 				fmt_opt(bytes_sent),
 				fmt_opt(bytes_lost),
