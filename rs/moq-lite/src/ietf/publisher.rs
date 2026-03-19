@@ -132,6 +132,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				.origin
 				.consume_broadcast(&msg.track_namespace)
 				.map(|bc| bc.ingest_bytes_counter());
+			tracing::info!(
+				broadcast = %absolute,
+				has_counter = ingest_counter.is_some(),
+				"relay-stats: ingest counter lookup"
+			);
 
 			web_async::spawn(async move {
 				if let Err(err) = Self::run_stats_track(session, request_id, rx, version, ingest_counter).await {
@@ -453,6 +458,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 			// Compute ingest (receive) rate from broadcast ingest bytes delta / 1 second.
 			let curr_ingest = ingest_counter.as_ref().map(|c| c.load(Ordering::Relaxed));
+			if sequence == 0 {
+				tracing::info!(curr_ingest = ?curr_ingest, has_counter = ingest_counter.is_some(), "relay-stats: first tick");
+			}
 			let receive_rate_mbps = match (curr_ingest, prev_ingest_bytes) {
 				(Some(curr), Some(prev)) => {
 					let delta = curr.saturating_sub(prev);
