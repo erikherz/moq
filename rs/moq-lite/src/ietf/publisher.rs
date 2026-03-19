@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::oneshot;
@@ -126,8 +127,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			let subscribes = self.subscribes.clone();
 			let version = self.version;
 
+			// Get the broadcast's ingest bytes counter if available.
+			let ingest_counter = self
+				.origin
+				.consume_broadcast(&msg.track_namespace)
+				.map(|bc| bc.ingest_bytes_counter());
+
 			web_async::spawn(async move {
-				if let Err(err) = Self::run_stats_track(session, request_id, rx, version).await {
+				if let Err(err) = Self::run_stats_track(session, request_id, rx, version, ingest_counter).await {
 					tracing::debug!(?err, "relay-stats track ended");
 				}
 				subscribes.lock().remove(&request_id);
@@ -424,10 +431,11 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		request_id: RequestId,
 		mut cancel: oneshot::Receiver<()>,
 		version: Version,
+		ingest_counter: Option<Arc<AtomicU64>>,
 	) -> Result<(), Error> {
 		let mut sequence: u64 = 0;
 		let mut interval = tokio::time::interval(Duration::from_secs(1));
-		let mut prev_bytes_received: Option<u64> = None;
+		let mut prev_ingest_bytes: Option<u64> = None;
 
 		loop {
 			tokio::select! {
@@ -438,20 +446,21 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			}
 
 			// Extract all stats values before any await points (impl Stats may not be Send).
-			let (rtt, send_rate, bytes_sent, bytes_lost, bytes_received, packets_sent, packets_lost) = {
+			let (rtt, send_rate, bytes_sent, bytes_lost, packets_sent, packets_lost) = {
 				let s = session.stats();
-				(s.rtt(), s.estimated_send_rate(), s.bytes_sent(), s.bytes_lost(), s.bytes_received(), s.packets_sent(), s.packets_lost())
+				(s.rtt(), s.estimated_send_rate(), s.bytes_sent(), s.bytes_lost(), s.packets_sent(), s.packets_lost())
 			};
 
-			// Compute receive rate from delta bytes_received / 1 second interval.
-			let receive_rate_mbps = match (bytes_received, prev_bytes_received) {
+			// Compute ingest (receive) rate from broadcast ingest bytes delta / 1 second.
+			let curr_ingest = ingest_counter.as_ref().map(|c| c.load(Ordering::Relaxed));
+			let receive_rate_mbps = match (curr_ingest, prev_ingest_bytes) {
 				(Some(curr), Some(prev)) => {
 					let delta = curr.saturating_sub(prev);
 					format!("{:.1}", delta as f64 * 8.0 / 1_000_000.0)
 				}
 				_ => "null".to_string(),
 			};
-			prev_bytes_received = bytes_received;
+			prev_ingest_bytes = curr_ingest;
 
 			let timestamp = SystemTime::now()
 				.duration_since(UNIX_EPOCH)

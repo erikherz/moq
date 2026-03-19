@@ -1,5 +1,6 @@
 use std::{
 	collections::{HashMap, hash_map},
+	sync::{Arc, atomic::{AtomicU64, Ordering}},
 	task::{Poll, ready},
 };
 
@@ -21,7 +22,7 @@ impl Broadcast {
 	}
 }
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 struct State {
 	// Weak references for deduplication. Doesn't prevent track auto-close.
 	tracks: HashMap<String, TrackWeak>,
@@ -35,6 +36,21 @@ struct State {
 
 	// The error that caused the broadcast to be aborted, if any.
 	abort: Option<Error>,
+
+	// Cumulative bytes ingested from the publisher for this broadcast.
+	ingest_bytes: Arc<AtomicU64>,
+}
+
+impl Default for State {
+	fn default() -> Self {
+		Self {
+			tracks: Default::default(),
+			requests: Default::default(),
+			dynamic: 0,
+			abort: None,
+			ingest_bytes: Arc::new(AtomicU64::new(0)),
+		}
+	}
 }
 
 fn modify(state: &conducer::Producer<State>) -> Result<conducer::Mut<'_, State>, Error> {
@@ -130,6 +146,11 @@ impl BroadcastProducer {
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
 	}
+
+	/// Get a shared reference to the ingest bytes counter for this broadcast.
+	pub fn ingest_counter(&self) -> Arc<AtomicU64> {
+		self.state.read().ingest_bytes.clone()
+	}
 }
 
 #[cfg(test)]
@@ -215,6 +236,11 @@ impl BroadcastDynamic {
 	/// Return true if this is the same broadcast instance.
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
+	}
+
+	/// Get a shared reference to the ingest bytes counter for this broadcast.
+	pub fn ingest_counter(&self) -> Arc<AtomicU64> {
+		self.state.read().ingest_bytes.clone()
 	}
 }
 
@@ -319,6 +345,16 @@ impl BroadcastConsumer {
 	/// Check if this is the exact same instance of a broadcast.
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
+	}
+
+	/// Read the cumulative ingest bytes for this broadcast.
+	pub fn ingest_bytes(&self) -> u64 {
+		self.state.read().ingest_bytes.load(Ordering::Relaxed)
+	}
+
+	/// Get a shared reference to the ingest bytes counter.
+	pub fn ingest_bytes_counter(&self) -> Arc<AtomicU64> {
+		self.state.read().ingest_bytes.clone()
 	}
 }
 

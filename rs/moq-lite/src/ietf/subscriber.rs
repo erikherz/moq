@@ -1,4 +1,5 @@
 use std::collections::{HashMap, hash_map::Entry};
+use std::sync::{Arc, atomic::{AtomicU64, Ordering}};
 
 use crate::{
 	Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer, OriginProducer, Path, PathOwned,
@@ -33,6 +34,7 @@ struct State {
 struct TrackState {
 	producer: TrackProducer,
 	alias: Option<u64>,
+	ingest_counter: Option<Arc<AtomicU64>>,
 }
 
 struct BroadcastState {
@@ -296,6 +298,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	async fn run_broadcast(&mut self, path: Path<'_>, mut broadcast: BroadcastDynamic) -> Result<(), Error> {
+		let ingest_counter = broadcast.ingest_counter();
+
 		// Actually start serving subscriptions.
 		loop {
 			// Keep serving requests until there are no more consumers.
@@ -320,6 +324,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				TrackState {
 					producer: track.clone(),
 					alias: None,
+					ingest_counter: Some(ingest_counter.clone()),
 				},
 			);
 
@@ -373,7 +378,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 			return Err(Error::Unsupported);
 		}
 
-		let mut producer = {
+		let (mut producer, ingest_counter) = {
 			let mut state = self.state.lock();
 			let request_id = match state.aliases.get(&group.track_alias) {
 				Some(request_id) => *request_id,
@@ -383,16 +388,17 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				}
 			};
 			let track = state.subscribes.get_mut(&request_id).ok_or(Error::NotFound)?;
+			let counter = track.ingest_counter.clone();
 
 			let group = Group {
 				sequence: group.group_id,
 			};
-			track.producer.create_group(group)?
+			(track.producer.create_group(group)?, counter)
 		};
 
 		let res = tokio::select! {
 			err = producer.closed() => Err(err),
-			res = self.run_group(group, stream, producer.clone()) => res,
+			res = self.run_group(group, stream, producer.clone(), ingest_counter) => res,
 		};
 
 		match res {
@@ -418,6 +424,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		group: ietf::GroupHeader,
 		stream: &mut Reader<S::RecvStream, Version>,
 		mut producer: GroupProducer,
+		ingest_counter: Option<Arc<AtomicU64>>,
 	) -> Result<(), Error> {
 		while let Some(id_delta) = stream.decode_maybe::<u64>().await? {
 			if id_delta != 0 {
@@ -445,6 +452,10 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 					return Err(Error::Unsupported);
 				}
 			} else {
+				if let Some(ref counter) = ingest_counter {
+					counter.fetch_add(size, Ordering::Relaxed);
+				}
+
 				let mut frame = producer.create_frame(Frame { size })?;
 
 				if let Err(err) = self.run_frame(stream, frame.clone()).await {
@@ -552,15 +563,6 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		.produce();
 
 		let mut state = self.state.lock();
-		match state.subscribes.entry(request_id) {
-			Entry::Vacant(entry) => {
-				entry.insert(TrackState {
-					producer: track.clone(),
-					alias: Some(msg.track_alias),
-				});
-			}
-			Entry::Occupied(_) => return Err(Error::Duplicate),
-		};
 
 		// Save that we're implicitly announcing this track.
 		state.publishes.insert(request_id, msg.track_namespace.to_owned());
@@ -569,7 +571,20 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		// Announce our namespace if we haven't already.
 		// NOTE: This is debated in the IETF draft, but is significantly easier to implement.
 		let mut broadcast = self.start_announce(msg.track_namespace.to_owned())?;
+		let ingest_counter = Some(broadcast.ingest_counter());
 		broadcast.insert_track(&track)?;
+
+		let mut state = self.state.lock();
+		match state.subscribes.entry(request_id) {
+			Entry::Vacant(entry) => {
+				entry.insert(TrackState {
+					producer: track.clone(),
+					alias: Some(msg.track_alias),
+					ingest_counter,
+				});
+			}
+			Entry::Occupied(_) => return Err(Error::Duplicate),
+		};
 
 		Ok(())
 	}
