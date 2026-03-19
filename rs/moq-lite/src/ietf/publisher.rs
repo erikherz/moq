@@ -489,7 +489,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			};
 
 			let json = format!(
-				r#"{{"rtt_ms":{},"send_rate_mbps":{},"receive_rate_mbps":{},"bytes_sent":{},"bytes_lost":{},"packets_sent":{},"packets_lost":{},"timestamp":{}}}"#,
+				r#"{{"rtt_ms":{},"send_rate_mbps":{},"receive_rate_mbps":{},"bytes_sent":{},"bytes_lost":{},"packets_sent":{},"packets_lost":{},"timestamp":{},"version":"{}"}}"#,
 				rtt_ms,
 				send_rate_mbps,
 				receive_rate_mbps,
@@ -498,6 +498,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				fmt_opt(packets_sent),
 				fmt_opt(packets_lost),
 				timestamp,
+				env!("CARGO_PKG_VERSION"),
 			);
 
 			let payload = json.into_bytes();

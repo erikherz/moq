@@ -38,6 +38,10 @@ async fn main() -> anyhow::Result<()> {
 		.install_default()
 		.expect("failed to install default crypto provider");
 
+	let version = env!("CARGO_PKG_VERSION");
+	let git_hash = option_env!("MOQ_GIT_HASH").unwrap_or("unknown");
+	tracing::info!(version, git_hash, "moq-relay starting");
+
 	let mut config = Config::load()?;
 
 	let addr = config.server.bind.unwrap_or("[::]:443".parse().unwrap());
