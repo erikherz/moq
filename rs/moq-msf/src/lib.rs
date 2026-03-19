@@ -83,6 +83,15 @@ pub struct Track {
 
 	/// Alternate group for quality switching.
 	pub alt_group: Option<u32>,
+
+	/// Maximum SAP type that MOQT Groups start with (CMSF, optional).
+	pub max_grp_sap_starting_type: Option<u32>,
+
+	/// Maximum SAP type that MOQT Objects start with (CMSF, optional).
+	pub max_obj_sap_starting_type: Option<u32>,
+
+	/// Event type identifier for eventtimeline tracks (CMSF).
+	pub event_type: Option<String>,
 }
 
 impl Catalog {
@@ -246,6 +255,9 @@ mod test {
 				init_data: None,
 				render_group: Some(1),
 				alt_group: None,
+				max_grp_sap_starting_type: None,
+				max_obj_sap_starting_type: None,
+				event_type: None,
 			}],
 		};
 
@@ -282,6 +294,9 @@ mod test {
 				init_data: None,
 				render_group: Some(1),
 				alt_group: None,
+				max_grp_sap_starting_type: None,
+				max_obj_sap_starting_type: None,
+				event_type: None,
 			}],
 		};
 
@@ -365,6 +380,9 @@ mod test {
 				init_data: Some("AQID".to_string()),
 				render_group: Some(1),
 				alt_group: Some(1),
+				max_grp_sap_starting_type: Some(1),
+				max_obj_sap_starting_type: Some(1),
+				event_type: None,
 			}],
 		};
 

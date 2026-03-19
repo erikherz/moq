@@ -28,6 +28,7 @@ pub fn to_msf_with_namespace(catalog: &hang::Catalog, namespace: Option<&str>) -
 				.map(|d| base64::engine::general_purpose::STANDARD.encode(d.as_ref())),
 		};
 
+		let is_cmaf = matches!(packaging, moq_msf::Packaging::Cmaf);
 		tracks.push(moq_msf::Track {
 			name: name.clone(),
 			namespace: namespace.map(|s| s.to_string()),
@@ -44,6 +45,10 @@ pub fn to_msf_with_namespace(catalog: &hang::Catalog, namespace: Option<&str>) -
 			init_data,
 			render_group: Some(1),
 			alt_group: if has_multiple_video { Some(1) } else { None },
+			// CMSF: SAP type 1 = IDR (closed GOP) for H.264/H.265 group starts
+			max_grp_sap_starting_type: if is_cmaf { Some(1) } else { None },
+			max_obj_sap_starting_type: if is_cmaf { Some(1) } else { None },
+			event_type: None,
 		});
 	}
 
@@ -78,6 +83,9 @@ pub fn to_msf_with_namespace(catalog: &hang::Catalog, namespace: Option<&str>) -
 			init_data,
 			render_group: Some(1),
 			alt_group: if has_multiple_audio { Some(1) } else { None },
+			max_grp_sap_starting_type: None,
+			max_obj_sap_starting_type: None,
+			event_type: None,
 		});
 	}
 
@@ -100,6 +108,41 @@ pub fn to_msf_with_namespace(catalog: &hang::Catalog, namespace: Option<&str>) -
 		target_latency: Some(2000),
 		tracks,
 	}
+}
+
+/// CMSF SAP event type identifier.
+pub const CMSF_SAP_EVENT_TYPE: &str = "org.ietf.moq.cmsf.sap";
+
+/// Create an MSF Track entry for a CMSF SAP-type event timeline.
+pub fn sap_timeline_track(name: &str, namespace: Option<&str>) -> moq_msf::Track {
+	moq_msf::Track {
+		name: name.to_string(),
+		namespace: namespace.map(|s| s.to_string()),
+		packaging: moq_msf::Packaging::EventTimeline,
+		is_live: true,
+		role: None,
+		codec: None,
+		width: None,
+		height: None,
+		framerate: None,
+		samplerate: None,
+		channel_config: None,
+		bitrate: None,
+		init_data: None,
+		render_group: None,
+		alt_group: None,
+		max_grp_sap_starting_type: None,
+		max_obj_sap_starting_type: None,
+		event_type: Some(CMSF_SAP_EVENT_TYPE.to_string()),
+	}
+}
+
+/// Format a CMSF SAP event JSON payload.
+///
+/// `sap_type`: 0 = no SAP, 1 = IDR (closed GOP), 2 = open GOP (CRA), 3 = gradual decoding refresh.
+/// `ept_ms`: earliest presentation timestamp in milliseconds.
+pub fn sap_event_json(sap_type: u32, ept_ms: u64) -> String {
+	format!("{{\"l\":[{},{}]}}", sap_type, ept_ms)
 }
 
 /// Convert Unix epoch seconds to (year, month, day, hour, minute, second) UTC.
@@ -209,6 +252,8 @@ mod test {
 		assert_eq!(video.namespace, None);
 		assert_eq!(video.role, Some(moq_msf::Role::Video));
 		assert_eq!(video.packaging, moq_msf::Packaging::Legacy);
+		// Legacy packaging doesn't get CMSF SAP fields
+		assert_eq!(video.max_grp_sap_starting_type, None);
 		assert_eq!(video.codec, Some("avc3.64001f".to_string()));
 		assert_eq!(video.width, Some(1280));
 		assert_eq!(video.height, Some(720));
@@ -317,5 +362,22 @@ mod test {
 		let video = &msf.tracks[0];
 		assert_eq!(video.packaging, moq_msf::Packaging::Cmaf);
 		assert_eq!(video.init_data, Some("AAAYZ2Z0eXA=".to_string()));
+		// CMAF video tracks get CMSF SAP fields
+		assert_eq!(video.max_grp_sap_starting_type, Some(1));
+		assert_eq!(video.max_obj_sap_starting_type, Some(1));
+	}
+
+	#[test]
+	fn sap_timeline_track_entry() {
+		let track = sap_timeline_track("sap-events", Some("test-ns"));
+		assert_eq!(track.packaging, moq_msf::Packaging::EventTimeline);
+		assert_eq!(track.event_type.as_deref(), Some(CMSF_SAP_EVENT_TYPE));
+		assert_eq!(track.namespace.as_deref(), Some("test-ns"));
+	}
+
+	#[test]
+	fn sap_event_json_format() {
+		let json = sap_event_json(1, 12345);
+		assert_eq!(json, "{\"l\":[1,12345]}");
 	}
 }
