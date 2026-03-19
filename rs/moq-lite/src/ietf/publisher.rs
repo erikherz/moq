@@ -1,8 +1,9 @@
 use std::collections::HashMap;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use web_async::FuturesExt;
-use web_transport_trait::SendStream;
+use web_transport_trait::{SendStream, Stats};
 
 use crate::{
 	AsPath, Error, Origin, OriginConsumer, Track, TrackConsumer,
@@ -104,6 +105,31 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		let absolute = self.origin.absolute(&msg.track_namespace).to_owned();
 
 		tracing::info!(id = %request_id, broadcast = %absolute, track = %track_name, "subscribe started");
+
+		// Intercept relay-stats: generate per-subscriber transport stats instead of forwarding.
+		if msg.track_name == "relay-stats" {
+			stream.writer.encode(&ietf::SubscribeOk::ID).await?;
+			stream
+				.writer
+				.encode(&ietf::SubscribeOk {
+					request_id: match self.version {
+						Version::Draft17 => None,
+						_ => Some(request_id),
+					},
+					track_alias: request_id.0,
+				})
+				.await?;
+
+			let res = tokio::select! {
+				res = Self::run_stats_track(self.session.clone(), request_id, self.version) => res,
+				_ = stream.reader.closed() => Ok(()),
+				_ = self.session.closed() => Ok(()),
+			};
+
+			tracing::debug!("relay-stats track ended");
+			stream.writer.finish().ok();
+			return res;
+		}
 
 		let Some(broadcast) = self.origin.consume_broadcast(&msg.track_namespace) else {
 			self.write_subscribe_error(&mut stream.writer, request_id, 404, "Broadcast not found")
@@ -312,6 +338,86 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		tracing::debug!(sequence = %msg.group_id, "finished group");
 
 		Ok(())
+	}
+
+	/// Generate per-subscriber transport stats as a MoQ track (~1 group/sec).
+	///
+	/// Produces JSON groups containing QUIC connection stats (RTT, estimated send rate,
+	/// bytes/packets sent/lost) for the subscriber's own connection. Useful for player-side
+	/// diagnostics and relay-assisted ABR decisions.
+	async fn run_stats_track(
+		session: S,
+		request_id: RequestId,
+		version: Version,
+	) -> Result<(), Error> {
+		let mut sequence: u64 = 0;
+		let mut interval = tokio::time::interval(Duration::from_secs(1));
+
+		loop {
+			tokio::select! {
+				biased;
+				_ = session.closed() => return Ok(()),
+				_ = interval.tick() => {}
+			}
+
+			// Extract all stats values before any await points (impl Stats may not be Send).
+			let (rtt, send_rate, bytes_sent, bytes_lost, packets_sent, packets_lost) = {
+				let s = session.stats();
+				(s.rtt(), s.estimated_send_rate(), s.bytes_sent(), s.bytes_lost(), s.packets_sent(), s.packets_lost())
+			};
+
+			let timestamp = SystemTime::now()
+				.duration_since(UNIX_EPOCH)
+				.unwrap_or_default()
+				.as_millis() as u64;
+
+			let rtt_ms = match rtt {
+				Some(d) => format!("{:.1}", d.as_secs_f64() * 1000.0),
+				None => "null".to_string(),
+			};
+			let send_rate_mbps = match send_rate {
+				Some(r) => format!("{:.1}", r as f64 / 1_000_000.0),
+				None => "null".to_string(),
+			};
+			let fmt_opt = |v: Option<u64>| match v {
+				Some(n) => n.to_string(),
+				None => "null".to_string(),
+			};
+
+			let json = format!(
+				r#"{{"rtt_ms":{},"send_rate_mbps":{},"bytes_sent":{},"bytes_lost":{},"packets_sent":{},"packets_lost":{},"timestamp":{}}}"#,
+				rtt_ms,
+				send_rate_mbps,
+				fmt_opt(bytes_sent),
+				fmt_opt(bytes_lost),
+				fmt_opt(packets_sent),
+				fmt_opt(packets_lost),
+				timestamp,
+			);
+
+			let payload = json.into_bytes();
+
+			let mut stream = session.open_uni().await.map_err(Error::from_transport)?;
+			stream.set_priority(32); // Low priority — stats shouldn't compete with media.
+
+			let mut writer = Writer::new(stream, version);
+
+			let header = ietf::GroupHeader {
+				track_alias: request_id.0,
+				group_id: sequence,
+				sub_group_id: 0,
+				publisher_priority: 32,
+				flags: Default::default(),
+			};
+			writer.encode(&header).await?;
+			writer.encode(&0u64).await?; // object_id_delta = 0
+			writer.encode(&(payload.len() as u64)).await?; // payload length
+			writer.write_all(&mut bytes::Bytes::from(payload)).await?;
+			writer.finish()?;
+			writer.closed().await?;
+
+			sequence += 1;
+		}
 	}
 
 	/// Handle a FETCH on its bidi stream.
