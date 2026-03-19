@@ -1,6 +1,6 @@
 use std::{
 	collections::{HashMap, hash_map::Entry},
-	sync::{Arc, atomic},
+	sync::{Arc, atomic::{self, AtomicU64, Ordering}},
 };
 
 use crate::{
@@ -15,12 +15,17 @@ use super::Version;
 
 use web_async::Lock;
 
+struct TrackState {
+	producer: TrackProducer,
+	ingest_counter: Option<Arc<AtomicU64>>,
+}
+
 #[derive(Clone)]
 pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	session: S,
 
 	origin: Option<OriginProducer>,
-	subscribes: Lock<HashMap<u64, TrackProducer>>,
+	subscribes: Lock<HashMap<u64, TrackState>>,
 	next_id: Arc<atomic::AtomicU64>,
 	version: Version,
 	forced_namespaces: Vec<PathOwned>,
@@ -160,6 +165,8 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	}
 
 	async fn run_broadcast(self, path: PathOwned, mut broadcast: BroadcastDynamic) {
+		let ingest_counter = broadcast.ingest_counter();
+
 		// Actually start serving subscriptions.
 		loop {
 			// Keep serving requests until there are no more consumers.
@@ -177,17 +184,18 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 			let id = self.next_id.fetch_add(1, atomic::Ordering::Relaxed);
 			let mut this = self.clone();
+			let counter = ingest_counter.clone();
 
 			let path = path.clone();
 			web_async::spawn(async move {
-				this.run_subscribe(id, path, track).await;
+				this.run_subscribe(id, path, track, Some(counter)).await;
 				this.subscribes.lock().remove(&id);
 			});
 		}
 	}
 
-	async fn run_subscribe(&mut self, id: u64, broadcast: Path<'_>, mut track: TrackProducer) {
-		self.subscribes.lock().insert(id, track.clone());
+	async fn run_subscribe(&mut self, id: u64, broadcast: Path<'_>, mut track: TrackProducer, ingest_counter: Option<Arc<AtomicU64>>) {
+		self.subscribes.lock().insert(id, TrackState { producer: track.clone(), ingest_counter });
 
 		let msg = lite::Subscribe {
 			id,
@@ -258,17 +266,18 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	pub async fn recv_group(&mut self, stream: &mut Reader<S::RecvStream, Version>) -> Result<(), Error> {
 		let hdr: lite::Group = stream.decode().await?;
 
-		let mut group = {
+		let (mut group, ingest_counter) = {
 			let mut subs = self.subscribes.lock();
-			let track = subs.get_mut(&hdr.subscribe).ok_or(Error::Cancel)?;
+			let state = subs.get_mut(&hdr.subscribe).ok_or(Error::Cancel)?;
+			let counter = state.ingest_counter.clone();
 
 			let group = Group { sequence: hdr.sequence };
-			track.create_group(group)?
+			(state.producer.create_group(group)?, counter)
 		};
 
 		let res = tokio::select! {
 			err = group.closed() => Err(err),
-			res = self.run_group(stream, group.clone()) => res,
+			res = self.run_group(stream, group.clone(), ingest_counter) => res,
 		};
 
 		match res {
@@ -293,8 +302,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		&mut self,
 		stream: &mut Reader<S::RecvStream, Version>,
 		mut group: GroupProducer,
+		ingest_counter: Option<Arc<AtomicU64>>,
 	) -> Result<(), Error> {
 		while let Some(size) = stream.decode_maybe::<u64>().await? {
+			if let Some(ref counter) = ingest_counter {
+				counter.fetch_add(size, Ordering::Relaxed);
+			}
+
 			let mut frame = group.create_frame(Frame { size })?;
 
 			if let Err(err) = self.run_frame(stream, &mut frame).await {
