@@ -498,7 +498,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 				fmt_opt(packets_sent),
 				fmt_opt(packets_lost),
 				timestamp,
-				env!("CARGO_PKG_VERSION"),
+				env!("MOQ_GIT_HASH"),
 			);
 
 			let payload = json.into_bytes();
