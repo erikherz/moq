@@ -57,11 +57,17 @@ async fn main() -> anyhow::Result<()> {
 
 	let auth = config.auth.init().await?;
 
-	let cluster = Cluster::new(config.cluster, client);
+	let cluster = Cluster::new(config.cluster, client.clone());
 
 	// If directory mode is enabled, run it alongside the cluster.
+	// The directory handles registration with the Worker and pull-on-demand from origins.
 	if config.directory.is_enabled() {
-		let directory = Directory::new(config.directory, cluster.primary.clone());
+		let directory = Directory::new(
+			config.directory,
+			cluster.primary.clone(),
+			cluster.secondary.clone(),
+			client,
+		);
 		tokio::spawn(async move {
 			if let Err(e) = directory.run().await {
 				tracing::error!(%e, "directory failed");

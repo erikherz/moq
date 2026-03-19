@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use moq_lite::OriginProducer;
 use tokio_tungstenite::tungstenite::Message;
+use url::Url;
 
 #[serde_with::serde_as]
 #[derive(clap::Args, Clone, Debug, serde::Serialize, serde::Deserialize, Default)]
@@ -52,15 +54,29 @@ impl DirectoryConfig {
 pub struct Directory {
 	config: DirectoryConfig,
 	primary: OriginProducer,
+	secondary: OriginProducer,
+	client: moq_native::Client,
+	active_origins: HashMap<String, tokio::task::AbortHandle>,
 }
 
 impl Directory {
-	pub fn new(config: DirectoryConfig, primary: OriginProducer) -> Self {
-		Directory { config, primary }
+	pub fn new(
+		config: DirectoryConfig,
+		primary: OriginProducer,
+		secondary: OriginProducer,
+		client: moq_native::Client,
+	) -> Self {
+		Directory {
+			config,
+			primary,
+			secondary,
+			client,
+			active_origins: HashMap::new(),
+		}
 	}
 
 	/// Main loop: connect WebSocket, watch for announce/unannounce, reconnect on failure.
-	pub async fn run(self) -> anyhow::Result<()> {
+	pub async fn run(mut self) -> anyhow::Result<()> {
 		let mut backoff = 1u64;
 
 		loop {
@@ -80,7 +96,7 @@ impl Directory {
 	}
 
 	/// Single connection attempt: connect, register, then relay events.
-	async fn run_once(&self) -> anyhow::Result<()> {
+	async fn run_once(&mut self) -> anyhow::Result<()> {
 		let ws_url = self.config.ws_url();
 		tracing::info!(%ws_url, "connecting to directory");
 
@@ -141,11 +157,11 @@ impl Directory {
 					}
 				}
 
-				// Read messages from the Worker (acks, errors, pongs)
+				// Read messages from the Worker (acks, announcements from other nodes, etc.)
 				msg = stream.next() => {
 					match msg {
 						Some(Ok(Message::Text(text))) => {
-							tracing::debug!(msg = %text, "directory message");
+							self.handle_message(&text);
 						}
 						Some(Ok(Message::Close(_))) | None => {
 							tracing::info!("directory WebSocket closed by server");
@@ -168,5 +184,102 @@ impl Directory {
 		}
 
 		Ok(())
+	}
+
+	/// Handle messages from the directory Worker.
+	fn handle_message(&mut self, text: &str) {
+		let data: serde_json::Value = match serde_json::from_str(text) {
+			Ok(v) => v,
+			Err(_) => return,
+		};
+
+		match data.get("type").and_then(|t| t.as_str()) {
+			Some("origin_announced") => {
+				let origin_url = data["origin_url"].as_str().unwrap_or("");
+				let namespace = data["namespace"].as_str().unwrap_or("");
+				let origin_node = data["node"].as_str().unwrap_or("");
+
+				if origin_url.is_empty() {
+					return;
+				}
+
+				tracing::info!(%namespace, %origin_node, %origin_url, "origin announced via directory");
+
+				// Start a pull connection to this origin (one connection per origin, not per namespace)
+				if !self.active_origins.contains_key(origin_url) {
+					self.start_pull(origin_url);
+				}
+			}
+			Some("origin_disconnected") => {
+				let origin_url = data["origin_url"].as_str().unwrap_or("");
+				let origin_node = data["node"].as_str().unwrap_or("");
+
+				tracing::info!(%origin_node, %origin_url, "origin disconnected from directory");
+
+				if !origin_url.is_empty() {
+					self.stop_pull(origin_url);
+				}
+			}
+			_ => {
+				tracing::debug!(msg = %text, "directory message");
+			}
+		}
+	}
+
+	/// Start pulling content from a remote origin relay.
+	fn start_pull(&mut self, origin_url: &str) {
+		let url_str = origin_url.to_string();
+		let client = self.client.clone();
+		let primary = self.primary.clone();
+		let secondary = self.secondary.clone();
+
+		tracing::info!(origin = %url_str, "starting content pull from origin");
+
+		let handle = tokio::spawn(async move {
+			let mut backoff = 1u64;
+
+			loop {
+				let url = match Url::parse(&url_str) {
+					Ok(u) => u,
+					Err(e) => {
+						tracing::error!(%e, origin = %url_str, "invalid origin URL");
+						return;
+					}
+				};
+
+				match client
+					.clone()
+					.with_publish(primary.consume())
+					.with_consume(secondary.clone())
+					.connect(url)
+					.await
+				{
+					Ok(session) => {
+						backoff = 1;
+						tracing::info!(origin = %url_str, "pulling content from origin");
+						match session.closed().await {
+							Ok(()) => tracing::info!(origin = %url_str, "origin pull connection closed"),
+							Err(e) => tracing::warn!(%e, origin = %url_str, "origin pull connection error"),
+						}
+					}
+					Err(e) => {
+						tracing::warn!(%e, origin = %url_str, backoff, "failed to connect to origin");
+						backoff = (backoff * 2).min(30);
+					}
+				}
+
+				tokio::time::sleep(Duration::from_secs(backoff)).await;
+			}
+		});
+
+		self.active_origins.insert(origin_url.to_string(), handle.abort_handle());
+	}
+
+	/// Stop pulling content from a remote origin relay.
+	fn stop_pull(&mut self, origin_url: &str) {
+		if let Some(handle) = self.active_origins.remove(origin_url) {
+			tracing::info!(%origin_url, "stopping content pull from origin");
+			handle.abort();
+		}
 	}
 }
