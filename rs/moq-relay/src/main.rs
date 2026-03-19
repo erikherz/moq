@@ -12,6 +12,7 @@ mod auth;
 mod cluster;
 mod config;
 mod connection;
+mod directory;
 mod web;
 #[cfg(feature = "websocket")]
 mod websocket;
@@ -24,6 +25,7 @@ pub use auth::*;
 pub use cluster::*;
 pub use config::*;
 pub use connection::*;
+pub use directory::*;
 pub use web::*;
 
 use anyhow::Context;
@@ -56,6 +58,16 @@ async fn main() -> anyhow::Result<()> {
 	let auth = config.auth.init().await?;
 
 	let cluster = Cluster::new(config.cluster, client);
+
+	// If directory mode is enabled, run it alongside the cluster.
+	if config.directory.is_enabled() {
+		let directory = Directory::new(config.directory, cluster.primary.clone());
+		tokio::spawn(async move {
+			if let Err(e) = directory.run().await {
+				tracing::error!(%e, "directory failed");
+			}
+		});
+	}
 
 	// Create a web server too.
 	let web = Web::new(
