@@ -651,8 +651,7 @@ pub(crate) mod test {
 	}
 
 	pub(crate) async fn read_legacy_frames(track: moq_lite::TrackConsumer) -> Vec<(Timestamp, Vec<u8>, bool)> {
-		let mut ordered =
-			crate::consumer::OrderedConsumer::new(track, crate::consumer::Legacy, Duration::MAX);
+		let mut ordered = crate::consumer::OrderedConsumer::new(track, crate::consumer::Legacy, Duration::MAX);
 
 		let mut result = Vec::new();
 		while let Some(frame) = tokio::time::timeout(Duration::from_millis(500), ordered.read())

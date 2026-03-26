@@ -1229,8 +1229,7 @@ mod tests {
 	async fn media_container_legacy() {
 		tokio::time::pause();
 
-		let media =
-			crate::hang::Media::try_from(&hang::catalog::Container::Legacy).unwrap();
+		let media = crate::hang::Media::try_from(&hang::catalog::Container::Legacy).unwrap();
 
 		let mut track = moq_lite::Track::new("video").produce();
 		let consumer_track = track.consume();

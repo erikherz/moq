@@ -70,9 +70,7 @@ impl TryFrom<&hang::catalog::Container> for Media {
 					.map_err(|e| crate::cmaf::Error::Mp4(mp4_atom::Error::Io(std::io::Error::other(e))))?;
 
 				let mut cursor = std::io::Cursor::new(&init_bytes);
-				while let Some(atom) =
-					mp4_atom::Any::decode_maybe(&mut cursor).map_err(crate::cmaf::Error::from)?
-				{
+				while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).map_err(crate::cmaf::Error::from)? {
 					if let mp4_atom::Any::Moov(moov) = atom {
 						return Ok(Self::Cmaf(moov));
 					}
