@@ -161,6 +161,19 @@ impl OriginNode {
 		}
 	}
 
+	/// Re-announce all active broadcasts to all consumers.
+	fn reannounce_all(&mut self) -> u32 {
+		let mut count = 0;
+		if let Some(broadcast) = &self.broadcast {
+			self.notify.lock().reannounce(&broadcast.path, &broadcast.active);
+			count += 1;
+		}
+		for nested in self.nested.values() {
+			count += nested.lock().reannounce_all();
+		}
+		count
+	}
+
 	fn consume(&mut self, id: ConsumerId, mut notify: OriginConsumerNotify) {
 		self.consume_initial(&mut notify);
 		self.notify.lock().consumers.insert(id, notify);
@@ -401,6 +414,16 @@ impl OriginProducer {
 			nodes: self.nodes.select(prefixes)?,
 			root: self.root.clone(),
 		})
+	}
+
+	/// Re-announce all active broadcasts to all consumers.
+	/// Used for periodic gossip refresh to ensure late-joining peers learn about existing namespaces.
+	pub fn reannounce_all(&self) -> u32 {
+		let mut count = 0;
+		for (_, node) in &self.nodes.nodes {
+			count += node.lock().reannounce_all();
+		}
+		count
 	}
 
 	/// Subscribe to all announced broadcasts.

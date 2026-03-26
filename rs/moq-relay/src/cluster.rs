@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 use anyhow::Context;
 use moq_lite::{Broadcast, BroadcastConsumer, BroadcastProducer, Origin, OriginConsumer, OriginProducer};
@@ -170,9 +170,28 @@ impl Cluster {
 				res.context("failed to connect to remotes")?;
 				anyhow::bail!("connection to remotes closed");
 			}
-			res = self.run_combined() => {
+			res = self.clone().run_combined() => {
 				res.context("failed to run combined")?;
 				anyhow::bail!("combined connection closed");
+			}
+			res = self.run_reannounce() => {
+				res.context("failed to run reannounce")?;
+				anyhow::bail!("reannounce loop closed");
+			}
+		}
+	}
+
+	/// Periodically re-announce all locally-published broadcasts to the mesh.
+	/// This ensures late-joining or reconnecting relays learn about existing namespaces.
+	async fn run_reannounce(&self) -> anyhow::Result<()> {
+		let mut interval = tokio::time::interval(Duration::from_secs(30));
+		interval.tick().await; // skip first immediate tick
+
+		loop {
+			interval.tick().await;
+			let count = self.primary.reannounce_all();
+			if count > 0 {
+				tracing::debug!("re-announced {count} broadcasts to mesh");
 			}
 		}
 	}
