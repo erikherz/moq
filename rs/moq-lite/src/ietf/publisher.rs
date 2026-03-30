@@ -363,7 +363,9 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 			// Extract all stats values before any await points (impl Stats may not be Send).
 			let (rtt, send_rate, bytes_sent, bytes_lost, packets_sent, packets_lost) = {
 				let s = session.stats();
-				(s.rtt(), s.estimated_send_rate(), s.bytes_sent(), s.bytes_lost(), s.packets_sent(), s.packets_lost())
+				let vals = (s.rtt(), s.estimated_send_rate(), s.bytes_sent(), s.bytes_lost(), s.packets_sent(), s.packets_lost());
+				tracing::debug!(rtt=?vals.0, send_rate=?vals.1, bytes_sent=?vals.2, "relay-stats raw values");
+				vals
 			};
 
 			let timestamp = SystemTime::now()
