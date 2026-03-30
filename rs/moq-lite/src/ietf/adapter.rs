@@ -713,6 +713,10 @@ impl<S: web_transport_trait::Session> web_transport_trait::Session for ControlSt
 		self.inner.protocol()
 	}
 
+	fn stats(&self) -> impl web_transport_trait::Stats {
+		self.inner.stats()
+	}
+
 	fn close(&self, code: u32, reason: &str) {
 		self.inner.close(code, reason)
 	}
