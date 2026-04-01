@@ -4,6 +4,19 @@ use web_transport_trait::Stats;
 
 use crate::{BandwidthConsumer, BandwidthProducer, Error, Version, coding::Writer};
 
+/// Transport-level connection statistics.
+#[derive(Debug, Clone, Default)]
+pub struct TransportStats {
+	pub bytes_sent: Option<u64>,
+	pub bytes_received: Option<u64>,
+	pub bytes_lost: Option<u64>,
+	pub packets_sent: Option<u64>,
+	pub packets_received: Option<u64>,
+	pub packets_lost: Option<u64>,
+	pub rtt: Option<Duration>,
+	pub estimated_send_rate: Option<u64>,
+}
+
 /// A MoQ transport session, wrapping a WebTransport connection.
 ///
 /// Created via:
@@ -91,6 +104,11 @@ impl Session {
 		let err = self.session.closed().await;
 		Err(Error::Transport(err))
 	}
+
+	/// Get transport-level connection statistics.
+	pub fn stats(&self) -> TransportStats {
+		self.session.stats()
+	}
 }
 
 impl Drop for Session {
@@ -150,6 +168,7 @@ trait SessionInner: Send + Sync {
 	fn close(&self, code: u32, reason: &str);
 	fn closed(&self) -> Pin<Box<dyn Future<Output = String> + Send + '_>>;
 	fn send_goaway(&self, uri: &str, version: Version) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + '_>>;
+	fn stats(&self) -> TransportStats;
 }
 
 impl<S: web_transport_trait::Session> SessionInner for S {
@@ -190,5 +209,19 @@ impl<S: web_transport_trait::Session> SessionInner for S {
 				}
 			}
 		})
+	}
+
+	fn stats(&self) -> TransportStats {
+		let s = S::stats(self);
+		TransportStats {
+			bytes_sent: web_transport_trait::Stats::bytes_sent(&s),
+			bytes_received: web_transport_trait::Stats::bytes_received(&s),
+			bytes_lost: web_transport_trait::Stats::bytes_lost(&s),
+			packets_sent: web_transport_trait::Stats::packets_sent(&s),
+			packets_received: web_transport_trait::Stats::packets_received(&s),
+			packets_lost: web_transport_trait::Stats::packets_lost(&s),
+			rtt: web_transport_trait::Stats::rtt(&s),
+			estimated_send_rate: web_transport_trait::Stats::estimated_send_rate(&s),
+		}
 	}
 }
