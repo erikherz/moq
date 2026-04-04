@@ -35,6 +35,17 @@ async fn main() -> anyhow::Result<()> {
 
 	let cluster = Cluster::new(config.cluster, client);
 
+	// Initialize relay stats + background reporter
+	let relay_stats = stats::RelayStats::new();
+	let relay_id = config.stats.relay_id
+		.unwrap_or_else(|| gethostname::gethostname().to_string_lossy().to_string());
+	let collector_url = config.stats.stats_collector_url.unwrap_or_default();
+	let stats_interval = std::time::Duration::from_secs(config.stats.stats_interval);
+	let reporter_stats = relay_stats.clone();
+	tokio::spawn(async move {
+		stats::run_stats_reporter(relay_id, reporter_stats, collector_url, stats_interval).await;
+	});
+
 	// Create a web server too.
 	let web = Web::new(
 		WebState {
@@ -60,16 +71,19 @@ async fn main() -> anyhow::Result<()> {
 	tokio::select! {
 		Err(err) = cluster.clone().run() => return Err(err).context("cluster failed"),
 		Err(err) = web.run() => return Err(err).context("web server failed"),
-		Err(err) = serve(server, cluster, auth) => return Err(err).context("server failed"),
+		Err(err) = serve(server, cluster, auth, relay_stats) => return Err(err).context("server failed"),
 		Err(err) = jemalloc => return Err(err).context("jemalloc profiler failed"),
 		else => Ok(()),
 	}
 }
 
-async fn serve(mut server: moq_native::Server, cluster: Cluster, auth: Auth) -> anyhow::Result<()> {
+async fn serve(mut server: moq_native::Server, cluster: Cluster, auth: Auth, stats: std::sync::Arc<stats::RelayStats>) -> anyhow::Result<()> {
 	let mut conn_id = 0;
 
 	while let Some(request) = server.accept().await {
+		let stats = stats.clone();
+		stats.conn_opened();
+
 		let conn = Connection {
 			id: conn_id,
 			request,
@@ -80,8 +94,10 @@ async fn serve(mut server: moq_native::Server, cluster: Cluster, auth: Auth) -> 
 		conn_id += 1;
 		tokio::spawn(async move {
 			if let Err(err) = conn.run().await {
+				stats.transport_error();
 				tracing::warn!(%err, "connection closed");
 			}
+			stats.conn_closed();
 		});
 	}
 
