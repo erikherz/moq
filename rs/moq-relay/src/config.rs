@@ -39,6 +39,11 @@ pub struct Config {
 	#[serde(default)]
 	pub web: WebConfig,
 
+	/// Stats collector configuration.
+	#[command(flatten)]
+	#[serde(default)]
+	pub stats: StatsConfig,
+
 	/// If provided, load the configuration from this file.
 	#[serde(default)]
 	pub file: Option<String>,
@@ -48,6 +53,31 @@ pub struct Config {
 	#[serde(default)]
 	#[cfg(feature = "iroh")]
 	pub iroh: moq_native::IrohEndpointConfig,
+}
+
+/// Stats collector configuration.
+#[derive(Parser, Clone, Debug, Deserialize, Serialize, Default)]
+#[serde(deny_unknown_fields, default)]
+pub struct StatsConfig {
+	/// Relay identifier (e.g. hostname). Defaults to system hostname.
+	#[arg(long, env = "RELAY_ID")]
+	#[serde(default)]
+	pub relay_id: Option<String>,
+
+	/// URL to POST stats JSON to (e.g. https://moqcdn.net/api/relay-stats).
+	/// Leave empty to only log stats locally.
+	#[arg(long, env = "STATS_COLLECTOR_URL")]
+	#[serde(default)]
+	pub stats_collector_url: Option<String>,
+
+	/// Stats reporting interval in seconds.
+	#[arg(long, default_value_t = 10)]
+	#[serde(default = "default_stats_interval")]
+	pub stats_interval: u64,
+}
+
+fn default_stats_interval() -> u64 {
+	10
 }
 
 impl Config {

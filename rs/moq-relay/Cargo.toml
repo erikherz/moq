@@ -32,6 +32,9 @@ axum-server = { version = "0.8", features = ["tls-rustls"] }
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
+gethostname = "1"
+libc = "0.2"
+reqwest = { version = "0.12", features = ["json"] }
 http-body = "1"
 moq-lite = { workspace = true, features = ["serde"] }
 moq-native = { workspace = true, default-features = false, features = ["aws-lc-rs"] }
