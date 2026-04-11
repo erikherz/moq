@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use crate::{Auth, AuthParams, Cluster};
 
 use axum::http;
@@ -37,6 +39,21 @@ impl Connection {
 			}
 		};
 
+		// Check subscriber limit for non-cluster subscriber sessions.
+		let is_subscriber = !token.cluster && !token.subscribe.is_empty();
+		let over_limit = is_subscriber && self.cluster.is_over_subscriber_limit();
+
+		if over_limit {
+			return self.run_goaway().await;
+		}
+
+		// Track subscriber count with RAII guard (decrements on drop).
+		let _subscriber_guard = if is_subscriber {
+			Some(self.cluster.subscriber_guard())
+		} else {
+			None
+		};
+
 		let publish = self.cluster.publisher(&token);
 		let subscribe = self.cluster.subscriber(&token);
 		let registration = self.cluster.register(&token);
@@ -74,6 +91,39 @@ impl Connection {
 		// Keep registration alive so the cluster node stays announced.
 		session.closed().await?;
 		drop(registration);
+		Ok(())
+	}
+
+	/// Accept the session, send GOAWAY with a redirect URI, then close.
+	async fn run_goaway(self) -> anyhow::Result<()> {
+		let redirect_uri = self.cluster.pick_redirect_target();
+		let transport = self.request.transport();
+
+		// Accept the session so we can send GOAWAY on the MoQ layer.
+		let mut session = self.request.ok().await?;
+
+		let version = session.version();
+		tracing::warn!(
+			%version, %transport,
+			redirect = redirect_uri.as_deref().unwrap_or("none"),
+			subscribers = self.cluster.subscriber_count.load(std::sync::atomic::Ordering::Relaxed),
+			max = ?self.cluster.config.max_subscribers,
+			"over subscriber limit, sending GOAWAY"
+		);
+
+		if let Some(ref uri) = redirect_uri {
+			match session.goaway(uri).await {
+				Ok(()) => {
+					// Give the client time to receive the GOAWAY before closing.
+					tokio::time::sleep(Duration::from_secs(2)).await;
+				}
+				Err(err) => {
+					tracing::debug!(%err, "GOAWAY send failed (version may not support it), closing connection");
+				}
+			}
+		}
+
+		session.close(moq_lite::Error::GoAway);
 		Ok(())
 	}
 }

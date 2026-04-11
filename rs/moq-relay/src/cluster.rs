@@ -1,4 +1,11 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+	collections::{HashMap, HashSet},
+	path::PathBuf,
+	sync::{
+		atomic::{AtomicUsize, Ordering},
+		Arc, RwLock,
+	},
+};
 
 use anyhow::Context;
 use moq_lite::{Broadcast, BroadcastConsumer, BroadcastProducer, Origin, OriginConsumer, OriginProducer};
@@ -54,6 +61,17 @@ pub struct ClusterConfig {
 		env = "MOQ_CLUSTER_PREFIX"
 	)]
 	pub prefix: String,
+
+	/// Maximum subscriber sessions before sending GOAWAY to new connections.
+	/// When the relay has this many active subscribers, new subscriber connections
+	/// receive a GOAWAY with a redirect URI pointing to a cluster peer.
+	/// 0 or unset = unlimited.
+	#[arg(
+		id = "cluster-max-subscribers",
+		long = "cluster-max-subscribers",
+		env = "MOQ_CLUSTER_MAX_SUBSCRIBERS"
+	)]
+	pub max_subscribers: Option<usize>,
 }
 
 /// Manages broadcast origins across local and remote relay nodes.
@@ -64,7 +82,7 @@ pub struct ClusterConfig {
 /// [`combined`](Self::combined) merges both for serving to end users.
 #[derive(Clone)]
 pub struct Cluster {
-	config: ClusterConfig,
+	pub config: ClusterConfig,
 	client: moq_native::Client,
 
 	/// Broadcasts announced by local clients (users).
@@ -75,6 +93,13 @@ pub struct Cluster {
 
 	/// Broadcasts announced by local clients and remote servers.
 	pub combined: OriginProducer,
+
+	/// Number of active non-cluster subscriber sessions.
+	pub subscriber_count: Arc<AtomicUsize>,
+
+	/// Known peer hostnames, learned from cluster connections.
+	/// Used for GOAWAY redirect target selection.
+	pub known_peers: Arc<RwLock<HashSet<String>>>,
 }
 
 impl Cluster {
@@ -86,6 +111,42 @@ impl Cluster {
 			primary: Origin::produce(),
 			secondary: Origin::produce(),
 			combined: Origin::produce(),
+			subscriber_count: Arc::new(AtomicUsize::new(0)),
+			known_peers: Arc::new(RwLock::new(HashSet::new())),
+		}
+	}
+
+	/// Returns true if the relay is at or over the subscriber limit.
+	pub fn is_over_subscriber_limit(&self) -> bool {
+		match self.config.max_subscribers {
+			Some(max) if max > 0 => self.subscriber_count.load(Ordering::Relaxed) >= max,
+			_ => false,
+		}
+	}
+
+	/// Pick a redirect target from known cluster peers for GOAWAY.
+	/// Returns the HTTPS URL of a peer, or None if no peers are known.
+	pub fn pick_redirect_target(&self) -> Option<String> {
+		if let Ok(peers) = self.known_peers.read() {
+			// Pick the first known peer that isn't us.
+			let my_node = self.config.node.as_deref();
+			for hostname in peers.iter() {
+				if my_node != Some(hostname.as_str()) {
+					return Some(format!("https://{hostname}/"));
+				}
+			}
+		}
+
+		// Fallback to cluster root.
+		self.config.root.as_ref().map(|h| format!("https://{h}/"))
+	}
+
+	/// Create an RAII guard that increments the subscriber count now
+	/// and decrements it when dropped.
+	pub fn subscriber_guard(&self) -> SubscriberGuard {
+		self.subscriber_count.fetch_add(1, Ordering::Relaxed);
+		SubscriberGuard {
+			count: self.subscriber_count.clone(),
 		}
 	}
 
@@ -126,6 +187,13 @@ impl Cluster {
 
 		let path = moq_lite::Path::new(&self.config.prefix).join(&node);
 		self.primary.publish_broadcast(path, broadcast.consume());
+
+		// Track this peer for GOAWAY redirect selection.
+		if let Ok(mut peers) = self.known_peers.write() {
+			if peers.insert(node.clone()) {
+				tracing::info!(peer = %node, "registered incoming cluster peer for GOAWAY redirect");
+			}
+		}
 
 		Some(ClusterRegistration::new(node, broadcast))
 	}
@@ -307,6 +375,15 @@ impl Cluster {
 		log_url.set_query(None);
 		tracing::info!(url = %log_url, "connecting to remote");
 
+		// Track this peer hostname for GOAWAY redirect selection.
+		if let Some(host) = url.host_str() {
+			if let Ok(mut peers) = self.known_peers.write() {
+				if peers.insert(host.to_string()) {
+					tracing::info!(peer = %host, "registered cluster peer for GOAWAY redirect");
+				}
+			}
+		}
+
 		let session = self
 			.client
 			.clone()
@@ -341,5 +418,16 @@ impl Drop for ClusterRegistration {
 	fn drop(&mut self) {
 		tracing::info!(%self.node, "unregistered cluster client");
 		let _ = self.broadcast.abort(moq_lite::Error::Cancel);
+	}
+}
+
+/// RAII guard that decrements the subscriber count when dropped.
+pub struct SubscriberGuard {
+	count: Arc<AtomicUsize>,
+}
+
+impl Drop for SubscriberGuard {
+	fn drop(&mut self) {
+		self.count.fetch_sub(1, Ordering::Relaxed);
 	}
 }

@@ -89,6 +89,10 @@ pub enum Error {
 	/// A remote error received via a stream/session reset code.
 	#[error("remote error: code={0}")]
 	Remote(u32),
+
+	/// The session was closed with a GOAWAY message.
+	#[error("goaway")]
+	GoAway,
 }
 
 impl Error {
@@ -118,6 +122,7 @@ impl Error {
 			Self::Dropped => 24,
 			Self::Closed => 25,
 			Self::CacheFull => 26,
+			Self::GoAway => 27,
 			Self::App(app) => *app as u32 + 64,
 			Self::Remote(code) => *code,
 		}

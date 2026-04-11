@@ -2,7 +2,7 @@ use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use web_transport_trait::Stats;
 
-use crate::{BandwidthConsumer, BandwidthProducer, Error, Version};
+use crate::{BandwidthConsumer, BandwidthProducer, Error, Version, coding::Writer};
 
 /// A MoQ transport session, wrapping a WebTransport connection.
 ///
@@ -65,6 +65,16 @@ impl Session {
 	/// Returns `None` if the MoQ version doesn't support PROBE (requires moq-lite-03+).
 	pub fn recv_bandwidth(&self) -> Option<BandwidthConsumer> {
 		self.recv_bandwidth.clone()
+	}
+
+	/// Send a GOAWAY message with a redirect URI, then close the session.
+	///
+	/// For Lite04+, opens a bidi stream with ControlType::Goaway and sends the Goaway message.
+	/// For older versions or IETF, falls back to closing the connection directly.
+	pub async fn goaway(&mut self, uri: &str) -> Result<(), Error> {
+		tracing::info!(%uri, version = %self.version, "sending GOAWAY");
+		self.session.send_goaway(uri, self.version).await?;
+		Ok(())
 	}
 
 	/// Close the underlying transport session.
@@ -139,6 +149,7 @@ async fn run_send_bandwidth_inner<S: web_transport_trait::Session>(session: &S, 
 trait SessionInner: Send + Sync {
 	fn close(&self, code: u32, reason: &str);
 	fn closed(&self) -> Pin<Box<dyn Future<Output = String> + Send + '_>>;
+	fn send_goaway(&self, uri: &str, version: Version) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + '_>>;
 }
 
 impl<S: web_transport_trait::Session> SessionInner for S {
@@ -148,5 +159,36 @@ impl<S: web_transport_trait::Session> SessionInner for S {
 
 	fn closed(&self) -> Pin<Box<dyn Future<Output = String> + Send + '_>> {
 		Box::pin(async move { S::closed(self).await.to_string() })
+	}
+
+	fn send_goaway(&self, uri: &str, version: Version) -> Pin<Box<dyn Future<Output = Result<(), Error>> + Send + '_>> {
+		let uri = uri.to_string();
+		Box::pin(async move {
+			match version {
+				Version::Lite(lite_version) => {
+					match lite_version {
+						crate::lite::Version::Lite01 | crate::lite::Version::Lite02 | crate::lite::Version::Lite03 => {
+							// Lite01-03 don't support GOAWAY, just close.
+							return Err(Error::Version);
+						}
+						_ => {}
+					}
+
+					// Open a bidi stream and send ControlType::Goaway + Goaway message.
+					let (send, _recv) = self.open_bi().await.map_err(Error::from_transport)?;
+					let mut writer = Writer::new(send, lite_version);
+					writer.encode(&crate::lite::ControlType::Goaway).await?;
+					writer.encode(&crate::lite::Goaway { uri: uri.into() }).await?;
+					writer.finish()?;
+
+					Ok(())
+				}
+				Version::Ietf(_) => {
+					// IETF GOAWAY requires the SETUP stream which we don't have access to here.
+					// For now, return an error — the caller should close the connection instead.
+					Err(Error::Version)
+				}
+			}
+		})
 	}
 }
