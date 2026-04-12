@@ -76,23 +76,16 @@ pub struct ClusterConfig {
 
 /// Manages broadcast origins across local and remote relay nodes.
 ///
-/// Broadcasts are split into three tiers: [`primary`](Self::primary)
-/// holds locally announced broadcasts, [`secondary`](Self::secondary)
-/// holds those learned from other cluster nodes, and
-/// [`combined`](Self::combined) merges both for serving to end users.
+/// All broadcasts (local and remote) are stored in a single origin.
+/// Hop-based routing ensures the shortest path is preferred and prevents loops.
 #[derive(Clone)]
 pub struct Cluster {
 	pub config: ClusterConfig,
 	client: moq_native::Client,
 
-	/// Broadcasts announced by local clients (users).
-	pub primary: OriginProducer,
-
-	/// Broadcasts announced by remote servers (cluster).
-	pub secondary: OriginProducer,
-
-	/// Broadcasts announced by local clients and remote servers.
-	pub combined: OriginProducer,
+	/// All broadcasts, both local and remote.
+	/// Hops-based routing ensures the shortest path is preferred.
+	pub origin: OriginProducer,
 
 	/// Number of active non-cluster subscriber sessions.
 	pub subscriber_count: Arc<AtomicUsize>,
@@ -108,9 +101,7 @@ impl Cluster {
 		Cluster {
 			config,
 			client,
-			primary: Origin::produce(),
-			secondary: Origin::produce(),
-			combined: Origin::produce(),
+			origin: Origin::produce(),
 			subscriber_count: Arc::new(AtomicUsize::new(0)),
 			known_peers: Arc::new(RwLock::new(HashSet::new())),
 		}
@@ -150,32 +141,18 @@ impl Cluster {
 		}
 	}
 
-	/// For a given auth token, return the origin that should be used for the session.
+	/// For a given auth token, return the origin consumer for subscribing.
+	/// All sessions see the same origin. Hop-counting prevents loops.
 	pub fn subscriber(&self, token: &AuthToken) -> Option<OriginConsumer> {
-		// These broadcasts will be served to the session (when it subscribes).
-		// If this is a cluster node, then only publish our primary broadcasts.
-		// Otherwise publish everything.
-		let subscribe_origin = match token.cluster {
-			true => &self.primary,
-			false => &self.combined,
-		};
-
-		// Scope the origin to our root.
-		let subscribe_origin = subscribe_origin.with_root(&token.root)?;
-		subscribe_origin.consume_only(&token.subscribe)
+		let origin = self.origin.with_root(&token.root)?;
+		origin.consume_only(&token.subscribe)
 	}
 
-	/// For a given auth token, return the origin that should be used for the session.
+	/// For a given auth token, return the origin producer for publishing.
+	/// All sessions publish to the same origin. Hop-counting prevents loops.
 	pub fn publisher(&self, token: &AuthToken) -> Option<OriginProducer> {
-		// If this is a cluster node, then add its broadcasts to the secondary origin.
-		// That way we won't publish them to other cluster nodes.
-		let publish_origin = match token.cluster {
-			true => &self.secondary,
-			false => &self.primary,
-		};
-
-		let publish_origin = publish_origin.with_root(&token.root)?;
-		publish_origin.publish_only(&token.publish)
+		let origin = self.origin.with_root(&token.root)?;
+		origin.publish_only(&token.publish)
 	}
 
 	/// Register a cluster node's presence.
@@ -186,7 +163,7 @@ impl Cluster {
 		let broadcast = Broadcast::produce();
 
 		let path = moq_lite::Path::new(&self.config.prefix).join(&node);
-		self.primary.publish_broadcast(path, broadcast.consume());
+		self.origin.publish_broadcast(path, broadcast.consume());
 
 		// Track this peer for GOAWAY redirect selection.
 		if let Ok(mut peers) = self.known_peers.write() {
@@ -198,18 +175,14 @@ impl Cluster {
 		Some(ClusterRegistration::new(node, broadcast))
 	}
 
-	/// Looks up a broadcast by name across primary and secondary origins.
+	/// Looks up a broadcast by name.
 	pub fn get(&self, broadcast: &str) -> Option<BroadcastConsumer> {
-		self.primary
-			.consume_broadcast(broadcast)
-			.or_else(|| self.secondary.consume_broadcast(broadcast))
+		self.origin.consume_broadcast(broadcast)
 	}
 
-	/// Runs the cluster event loop, connecting to remote nodes and
-	/// merging their broadcasts into the combined origin.
+	/// Runs the cluster event loop, connecting to remote nodes.
 	///
-	/// This future runs until the cluster is shut down or a fatal error
-	/// occurs.
+	/// This future runs until the cluster is shut down or a fatal error occurs.
 	pub async fn run(self) -> anyhow::Result<()> {
 		// If we're using a root node, then we have to connect to it.
 		// Otherwise, we're the root node so we wait for other nodes to connect to us.
@@ -220,14 +193,16 @@ impl Cluster {
 			.filter(|connect| Some(connect) != self.config.node.as_ref())
 		else {
 			tracing::info!("running as root, accepting leaf nodes");
-			self.run_combined().await?;
-			anyhow::bail!("combined connection closed");
+			// Root node just waits — no outbound connections needed.
+			// Leaf nodes connect to us and we discover them via registration broadcasts.
+			std::future::pending::<()>().await;
+			return Ok(());
 		};
 
-		// Subscribe to available origins from secondary (what we learn from other nodes).
+		// Subscribe to available origins (what we learn from other nodes).
 		// Use with_root to automatically strip the prefix from announced paths.
 		let origins = self
-			.secondary
+			.origin
 			.with_root(&self.config.prefix)
 			.context("no authorized origins")?;
 
@@ -252,32 +227,9 @@ impl Cluster {
 				res.context("failed to connect to root")?;
 				anyhow::bail!("connection to root closed");
 			}
-			res = self.clone().run_remotes(origins.consume(), token) => {
+			res = self.clone().run_remotes(origins.consume_only(&[moq_lite::Path::default()]).context("no origins")?, token) => {
 				res.context("failed to connect to remotes")?;
 				anyhow::bail!("connection to remotes closed");
-			}
-			res = self.run_combined() => {
-				res.context("failed to run combined")?;
-				anyhow::bail!("combined connection closed");
-			}
-		}
-	}
-
-	// Shovel broadcasts from the primary and secondary origins into the combined origin.
-	async fn run_combined(self) -> anyhow::Result<()> {
-		let mut primary = self.primary.consume();
-		let mut secondary = self.secondary.consume();
-
-		loop {
-			let (name, broadcast) = tokio::select! {
-				biased;
-				Some(primary) = primary.announced() => primary,
-				Some(secondary) = secondary.announced() => secondary,
-				else => return Ok(()),
-			};
-
-			if let Some(broadcast) = broadcast {
-				self.combined.publish_broadcast(&name, broadcast);
 			}
 		}
 	}
@@ -387,8 +339,8 @@ impl Cluster {
 		let session = self
 			.client
 			.clone()
-			.with_publish(self.primary.consume())
-			.with_consume(self.secondary.clone())
+			.with_publish(self.origin.consume())
+			.with_consume(self.origin.clone())
 			.connect(url.clone())
 			.await
 			.context("failed to connect to remote")?;

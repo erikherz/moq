@@ -7,7 +7,7 @@ use futures::{StreamExt, stream::FuturesUnordered};
 
 use crate::{
 	AsPath, BandwidthProducer, Broadcast, BroadcastDynamic, Error, Frame, FrameProducer, Group, GroupProducer,
-	OriginProducer, Path, PathOwned, TrackProducer,
+	OriginId, OriginProducer, Path, PathOwned, TrackProducer,
 	coding::{Reader, Stream},
 	lite,
 	model::BroadcastProducer,
@@ -22,6 +22,7 @@ pub(super) struct Subscriber<S: web_transport_trait::Session> {
 	session: S,
 
 	origin: Option<OriginProducer>,
+	origin_id: OriginId,
 	recv_bandwidth: Option<BandwidthProducer>,
 	subscribes: Lock<HashMap<u64, TrackProducer>>,
 	next_id: Arc<atomic::AtomicU64>,
@@ -35,9 +36,15 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 		recv_bandwidth: Option<BandwidthProducer>,
 		version: Version,
 	) -> Self {
+		let origin_id = match &origin {
+			Some(o) => o.id(),
+			None => OriginId::UNKNOWN,
+		};
+
 		Self {
 			session,
 			origin,
+			origin_id,
 			recv_bandwidth,
 			subscribes: Default::default(),
 			next_id: Default::default(),
@@ -109,7 +116,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		let msg = lite::AnnounceInterest {
 			prefix: prefix.as_path(),
-			exclude_hop: 0,
+			exclude_hop: self.origin_id.into_inner(),
 		};
 		stream.writer.encode(&msg).await?;
 
@@ -120,7 +127,7 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 				let msg: lite::AnnounceInit = stream.reader.decode().await?;
 				for suffix in msg.suffixes {
 					let path = prefix.join(&suffix);
-					self.start_announce(path, &mut producers)?;
+					self.start_announce(path, Vec::new(), &mut producers)?;
 				}
 			}
 			_ => {
@@ -130,9 +137,14 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 
 		while let Some(announce) = stream.reader.decode_maybe::<lite::Announce>().await? {
 			match announce {
-				lite::Announce::Active { suffix, .. } => {
+				lite::Announce::Active { suffix, hops } => {
 					let path = prefix.join(&suffix);
-					self.start_announce(path, &mut producers)?;
+					// Append our origin ID to the hop list before forwarding.
+					let mut new_hops = hops;
+					if self.origin_id != OriginId::UNKNOWN {
+						new_hops.push(self.origin_id.into_inner());
+					}
+					self.start_announce(path, new_hops, &mut producers)?;
 				}
 				lite::Announce::Ended { suffix, .. } => {
 					let path = prefix.join(&suffix);
@@ -198,11 +210,13 @@ impl<S: web_transport_trait::Session> Subscriber<S> {
 	fn start_announce(
 		&mut self,
 		path: PathOwned,
+		hops: Vec<u64>,
 		producers: &mut HashMap<PathOwned, BroadcastProducer>,
 	) -> Result<(), Error> {
-		tracing::debug!(broadcast = %self.log_path(&path), "announce");
+		let hop_ids: Vec<OriginId> = hops.iter().filter_map(|&id| OriginId::try_from(id).ok()).collect();
+		tracing::debug!(broadcast = %self.log_path(&path), hops = hop_ids.len(), "announce");
 
-		let broadcast = Broadcast::produce();
+		let broadcast = Broadcast::new().with_hops(hop_ids).into_produce();
 
 		// Make sure the peer doesn't double announce.
 		match producers.entry(path.to_owned()) {

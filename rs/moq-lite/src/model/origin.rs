@@ -5,7 +5,7 @@ use std::{
 use tokio::sync::mpsc;
 use web_async::Lock;
 
-use super::BroadcastConsumer;
+use super::{BroadcastConsumer, OriginId};
 use crate::{AsPath, Broadcast, BroadcastProducer, Path, PathOwned, PathPrefixes};
 
 static NEXT_CONSUMER_ID: AtomicU64 = AtomicU64::new(0);
@@ -145,11 +145,34 @@ impl OriginNode {
 			self.entry(dir).lock().publish(&full, broadcast, &relative);
 		} else if let Some(existing) = &mut self.broadcast {
 			// This node is a leaf with an existing broadcast.
-			let old = existing.active.clone();
-			existing.active = broadcast.clone();
-			existing.backup.push(old);
 
-			self.notify.lock().reannounce(full, broadcast);
+			// Loop detection: if the existing broadcast's hops are a strict prefix of the new one,
+			// the new broadcast is routing through us (loop). Reject it.
+			// Identical hop lists are not treated as loops (could be a re-announcement).
+			if !existing.active.info.hops.is_empty()
+				&& broadcast.info.hops.len() > existing.active.info.hops.len()
+				&& broadcast.info.hops.starts_with(&existing.active.info.hops)
+			{
+				tracing::debug!(broadcast = %full, "rejecting broadcast: hops are prefix of existing");
+				return;
+			}
+
+			if broadcast.info.hops.len() < existing.active.info.hops.len() {
+				// New broadcast has fewer hops, so it becomes active.
+				let old = existing.active.clone();
+				existing.active = broadcast.clone();
+				existing.backup.push(old);
+				self.notify.lock().announce(full, broadcast);
+			} else if broadcast.info.hops.len() > existing.active.info.hops.len() {
+				// More hops, just add to backup.
+				existing.backup.push(broadcast.clone());
+			} else {
+				// Same number of hops (including both empty): replace active, old goes to backup.
+				let old = existing.active.clone();
+				existing.active = broadcast.clone();
+				existing.backup.push(old);
+				self.notify.lock().reannounce(full, broadcast);
+			}
 		} else {
 			// This node is a leaf with no existing broadcast.
 			self.broadcast = Some(OriginBroadcast {
@@ -227,9 +250,17 @@ impl OriginNode {
 			// Okay so it must be the active broadcast or else we fucked up.
 			assert!(entry.active.is_clone(&broadcast));
 
-			// If there's a backup broadcast, then announce it.
-			if let Some(active) = entry.backup.pop() {
-				entry.active = active;
+			// If there's a backup, pick the one with fewest hops (most recent as tiebreaker).
+			if !entry.backup.is_empty() {
+				let best = entry
+					.backup
+					.iter()
+					.enumerate()
+					.rev()
+					.min_by_key(|(_, b)| b.info.hops.len())
+					.map(|(i, _)| i)
+					.unwrap();
+				entry.active = entry.backup.swap_remove(best);
 				self.notify.lock().reannounce(full, &entry.active);
 			} else {
 				// No more backups, so remove the entry.
@@ -340,8 +371,11 @@ impl Origin {
 }
 
 /// Announces broadcasts to consumers over the network.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct OriginProducer {
+	/// A unique identifier for this origin.
+	id: OriginId,
+
 	// The roots of the tree that we are allowed to publish.
 	// A path of "" means we can publish anything.
 	nodes: OriginNodes,
@@ -350,9 +384,30 @@ pub struct OriginProducer {
 	root: PathOwned,
 }
 
+impl Default for OriginProducer {
+	fn default() -> Self {
+		Self {
+			id: OriginId::random(),
+			nodes: OriginNodes::default(),
+			root: PathOwned::default(),
+		}
+	}
+}
+
 impl OriginProducer {
 	pub fn new() -> Self {
 		Self::default()
+	}
+
+	/// Set the origin ID.
+	pub fn with_id(mut self, id: OriginId) -> Self {
+		self.id = id;
+		self
+	}
+
+	/// Get the origin ID.
+	pub fn id(&self) -> OriginId {
+		self.id
 	}
 
 	/// Create and publish a new broadcast, returning the producer.
@@ -400,6 +455,7 @@ impl OriginProducer {
 	pub fn publish_only(&self, prefixes: &[Path]) -> Option<OriginProducer> {
 		let prefixes = PathPrefixes::new(prefixes);
 		Some(OriginProducer {
+			id: self.id,
 			nodes: self.nodes.select(&prefixes)?,
 			root: self.root.clone(),
 		})
@@ -436,6 +492,7 @@ impl OriginProducer {
 		let prefix = prefix.as_path();
 
 		Some(Self {
+			id: self.id,
 			root: self.root.join(&prefix).to_owned(),
 			nodes: self.nodes.root(&prefix)?,
 		})
