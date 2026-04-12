@@ -121,9 +121,12 @@ impl Connection {
 					tracing::debug!(%err, "GOAWAY send failed (version may not support it), closing connection");
 				}
 			}
+			// Close with the redirect URI in the reason so clients can extract it
+			// even if the GOAWAY bidi stream wasn't read in time.
+			session.close(moq_lite::Error::GoAwayRedirect(uri.clone()));
+		} else {
+			session.close(moq_lite::Error::GoAway);
 		}
-
-		session.close(moq_lite::Error::GoAway);
 		Ok(())
 	}
 }
