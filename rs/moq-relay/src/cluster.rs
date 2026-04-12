@@ -114,16 +114,19 @@ impl Cluster {
 		}
 	}
 
-	/// Pick a redirect target from known cluster peers for GOAWAY.
+	/// Pick a random redirect target from known cluster peers for GOAWAY.
 	/// Returns the HTTPS URL of a peer, or None if no peers are known.
 	pub fn pick_redirect_target(&self) -> Option<String> {
 		if let Ok(peers) = self.known_peers.read() {
-			// Pick the first known peer that isn't us.
 			let my_node = self.config.node.as_deref();
-			for hostname in peers.iter() {
-				if my_node != Some(hostname.as_str()) {
-					return Some(format!("https://{hostname}/"));
-				}
+			let candidates: Vec<&String> = peers.iter()
+				.filter(|h| my_node != Some(h.as_str()))
+				.collect();
+
+			if !candidates.is_empty() {
+				use rand::Rng;
+				let idx = rand::rng().random_range(0..candidates.len());
+				return Some(format!("https://{}/", candidates[idx]));
 			}
 		}
 
