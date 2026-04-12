@@ -1,5 +1,5 @@
 use std::{
-	collections::{HashMap, HashSet},
+	collections::HashSet,
 	path::PathBuf,
 	sync::{
 		atomic::{AtomicUsize, Ordering},
@@ -9,7 +9,6 @@ use std::{
 
 use anyhow::Context;
 use moq_lite::{Broadcast, BroadcastConsumer, BroadcastProducer, Origin, OriginConsumer, OriginProducer};
-use tracing::Instrument;
 use url::Url;
 
 use crate::AuthToken;
@@ -199,13 +198,6 @@ impl Cluster {
 			return Ok(());
 		};
 
-		// Subscribe to available origins (what we learn from other nodes).
-		// Use with_root to automatically strip the prefix from announced paths.
-		let origins = self
-			.origin
-			.with_root(&self.config.prefix)
-			.context("no authorized origins")?;
-
 		// If the token is provided, read it from the disk and use it in the query parameter.
 		// TODO put this in an AUTH header once WebTransport supports it.
 		let token = match &self.config.token {
@@ -221,58 +213,14 @@ impl Cluster {
 		// Create a dummy broadcast that we don't close so run_remote doesn't close.
 		let noop = Broadcast::produce();
 
-		// Despite returning a Result, we should NEVER return an Ok
-		tokio::select! {
-			res = self.clone().run_remote(&root, Some(local.as_str()), token.clone(), noop.consume()) => {
-				res.context("failed to connect to root")?;
-				anyhow::bail!("connection to root closed");
-			}
-			res = self.clone().run_remotes(origins.consume_only(&[moq_lite::Path::default()]).context("no origins")?, token) => {
-				res.context("failed to connect to remotes")?;
-				anyhow::bail!("connection to remotes closed");
-			}
-		}
-	}
-
-	async fn run_remotes(self, mut origins: OriginConsumer, token: String) -> anyhow::Result<()> {
-		// Cancel tasks when the origin is closed.
-		let mut active: HashMap<String, tokio::task::AbortHandle> = HashMap::new();
-
-		// Discover other origins.
-		// NOTE: The root node will connect to all other nodes as a client, ignoring the existing (server) connection.
-		// This ensures that nodes are advertising a valid hostname before any tracks get announced.
-		while let Some((node, origin)) = origins.announced().await {
-			if self.config.node.as_deref() == Some(node.as_str()) {
-				// Skip ourselves.
-				continue;
-			}
-
-			let Some(origin) = origin else {
-				tracing::info!(%node, "origin cancelled");
-				active.remove(node.as_str()).unwrap().abort();
-				continue;
-			};
-
-			tracing::info!(%node, "discovered origin");
-
-			let this = self.clone();
-			let token = token.clone();
-			let node2 = node.clone();
-
-			let handle = tokio::spawn(
-				async move {
-					match this.run_remote(node2.as_str(), None, token, origin).await {
-						Ok(()) => tracing::info!(%node2, "origin closed"),
-						Err(err) => tracing::warn!(%err, %node2, "origin error"),
-					}
-				}
-				.in_current_span(),
-			);
-
-			active.insert(node.to_string(), handle.abort_handle());
-		}
-
-		Ok(())
+		// Connect to our root node only. With single-origin hop-counting,
+		// broadcasts propagate through the tree naturally — no need for
+		// peer discovery via run_remotes() which would create duplicate connections.
+		self.clone()
+			.run_remote(&root, Some(local.as_str()), token, noop.consume())
+			.await
+			.context("failed to connect to root")?;
+		anyhow::bail!("connection to root closed");
 	}
 
 	#[tracing::instrument("remote", skip_all, err, fields(%remote))]
