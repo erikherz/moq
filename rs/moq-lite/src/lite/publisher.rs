@@ -51,14 +51,20 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 					Ok(())
 				}
 				lite::ControlType::Goaway => {
-					tracing::info!("received goaway stream");
-					Ok(())
+					self.recv_goaway(stream).await
 				}
 				lite::ControlType::Session | lite::ControlType::Fetch => Err(Error::UnexpectedStream),
 			} {
 				tracing::warn!(%err, "control stream error");
 			}
 		}
+	}
+
+	async fn recv_goaway(&self, mut stream: Stream<S, Version>) -> Result<(), Error> {
+		let goaway: lite::Goaway = stream.reader.decode().await?;
+		let uri = goaway.uri.to_string();
+		tracing::info!(%uri, "received GOAWAY with redirect");
+		Err(Error::GoAwayRedirect(uri))
 	}
 
 	fn recv_probe(&self, mut stream: Stream<S, Version>) {

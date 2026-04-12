@@ -93,6 +93,10 @@ pub enum Error {
 	/// The session was closed with a GOAWAY message.
 	#[error("goaway")]
 	GoAway,
+
+	/// The session received a GOAWAY with a redirect URI.
+	#[error("goaway redirect: {0}")]
+	GoAwayRedirect(String),
 }
 
 impl Error {
@@ -123,6 +127,7 @@ impl Error {
 			Self::Closed => 25,
 			Self::CacheFull => 26,
 			Self::GoAway => 27,
+			Self::GoAwayRedirect(_) => 27,
 			Self::App(app) => *app as u32 + 64,
 			Self::Remote(code) => *code,
 		}
