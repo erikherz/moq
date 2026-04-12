@@ -124,6 +124,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 	pub async fn recv_announce(&mut self, mut stream: Stream<S, Version>) -> Result<(), Error> {
 		let interest = stream.reader.decode::<lite::AnnounceInterest>().await?;
 		let prefix = interest.prefix.to_owned();
+		let exclude_hop = interest.exclude_hop;
 
 		let mut origin = self
 			.origin
@@ -132,7 +133,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 
 		let version = self.version;
 		web_async::spawn(async move {
-			if let Err(err) = Self::run_announce(&mut stream, &mut origin, &prefix, version).await {
+			if let Err(err) = Self::run_announce(&mut stream, &mut origin, &prefix, version, exclude_hop).await {
 				match &err {
 					Error::Cancel | Error::Transport(_) => {
 						tracing::debug!(prefix = %origin.absolute(prefix), "announcing cancelled");
@@ -154,6 +155,7 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 		origin: &mut OriginConsumer,
 		prefix: impl AsPath,
 		version: Version,
+		exclude_hop: u64,
 	) -> Result<(), Error> {
 		let prefix = prefix.as_path();
 
@@ -194,9 +196,14 @@ impl<S: web_transport_trait::Session> Publisher<S> {
 						Some((path, active)) => {
 							let suffix = path.strip_prefix(&prefix).expect("origin returned invalid path").to_owned();
 
-							if active.is_some() {
-								tracing::debug!(broadcast = %origin.absolute(&path), "announce");
-								let msg = lite::Announce::Active { suffix, hops: Vec::new() };
+							if let Some(broadcast) = active {
+								let hops: Vec<u64> = broadcast.info.hops.iter().map(|id| id.into_inner()).collect();
+								// Skip if the peer's exclude_hop is in the hop list (prevents loops).
+								if exclude_hop != 0 && hops.contains(&exclude_hop) {
+									continue;
+								}
+								tracing::debug!(broadcast = %origin.absolute(&path), hops = hops.len(), "announce");
+								let msg = lite::Announce::Active { suffix, hops };
 								stream.writer.encode(&msg).await?;
 							} else {
 								tracing::debug!(broadcast = %origin.absolute(&path), "unannounce");
