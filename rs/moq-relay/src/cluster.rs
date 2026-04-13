@@ -71,6 +71,23 @@ pub struct ClusterConfig {
 		env = "MOQ_CLUSTER_MAX_SUBSCRIBERS"
 	)]
 	pub max_subscribers: Option<usize>,
+
+	/// Preferred GOAWAY redirect target (checked first).
+	/// Must be a known peer hostname (e.g. "nwj.moqcdn.net").
+	#[arg(
+		id = "cluster-primary-redirect",
+		long = "cluster-primary-redirect",
+		env = "MOQ_CLUSTER_PRIMARY_REDIRECT"
+	)]
+	pub primary_redirect: Option<String>,
+
+	/// Secondary GOAWAY redirect target (checked if primary is unavailable).
+	#[arg(
+		id = "cluster-secondary-redirect",
+		long = "cluster-secondary-redirect",
+		env = "MOQ_CLUSTER_SECONDARY_REDIRECT"
+	)]
+	pub secondary_redirect: Option<String>,
 }
 
 /// Manages broadcast origins across local and remote relay nodes.
@@ -114,10 +131,26 @@ impl Cluster {
 		}
 	}
 
-	/// Pick a random redirect target from known cluster peers for GOAWAY.
-	/// Returns the HTTPS URL of a peer, or None if no peers are known.
+	/// Pick a redirect target from known cluster peers for GOAWAY.
+	/// Priority: primary_redirect > secondary_redirect > random peer > cluster root.
+	/// Primary and secondary are only used if the hostname is in known_peers.
 	pub fn pick_redirect_target(&self) -> Option<String> {
 		if let Ok(peers) = self.known_peers.read() {
+			// Check primary redirect first.
+			if let Some(ref primary) = self.config.primary_redirect {
+				if peers.contains(primary) {
+					return Some(format!("https://{primary}/"));
+				}
+			}
+
+			// Check secondary redirect.
+			if let Some(ref secondary) = self.config.secondary_redirect {
+				if peers.contains(secondary) {
+					return Some(format!("https://{secondary}/"));
+				}
+			}
+
+			// Fall back to random peer.
 			let my_node = self.config.node.as_deref();
 			let candidates: Vec<&String> = peers.iter()
 				.filter(|h| my_node != Some(h.as_str()))
